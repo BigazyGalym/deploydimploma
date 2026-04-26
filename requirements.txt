@@ -1,0 +1,15 @@
+asgiref==3.10.0
+Django==5.2.7
+django-allauth==65.12.1
+dj-rest-auth==7.2.0
+django-cors-headers==4.9.0
+djangorestframework==3.16.1
+djangorestframework_simplejwt==5.5.1
+cryptography==46.0.6
+pillow==12.0.0
+psycopg==3.2.12
+psycopg2==2.9.11
+PyJWT==2.10.1
+sqlparse==0.5.3
+gunicorn
+whitenoise
