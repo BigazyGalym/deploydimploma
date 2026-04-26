@@ -1,0 +1,679 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Админка - Тикеты</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+</head>
+<body>
+  <main class="wrap">
+    <section class="top">
+      <div>
+        <h1>Тикеты и Поддержка</h1>
+        <p>Работа с обращениями, чатами, SLA и приоритетами</p>
+      </div>
+      <div class="nav">
+        <div id="clock" class="pill"></div>
+        <a href="/dashboard/overview/" class="nav-pill">Обзор</a>
+        <a href="/dashboard/tickets/" class="nav-pill is-active">Тикеты</a>
+        <a href="/dashboard/activity/" class="nav-pill">Активность</a>
+        <a href="/dashboard/users/" class="nav-pill">Пользователи</a>
+        <a href="/support/" class="nav-pill">Портал поддержки</a>
+        <form action="/dashboard/logout/" method="post">
+          {% csrf_token %}
+          <button type="submit" class="secondary-button">Выйти</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card row">
+      <button id="refreshBtn" class="primary">Обновить данные</button>
+      <button id="exportBtn">Экспорт тикетов CSV</button>
+      <button id="pinnedToggle">Только закрепленные</button>
+      <button id="urgentBtn">Фокус на срочный</button>
+      <select id="statusFilter">
+        <option value="all">Все статусы</option>
+        <option value="open">Открыт</option>
+        <option value="in_progress">В работе</option>
+        <option value="answered">Отвечен</option>
+        <option value="closed">Закрыт</option>
+      </select>
+      <input id="searchInput" class="grow-input" placeholder="Поиск: email/тема/сообщение" />
+      <span id="statusText" class="pill">Готово</span>
+      <span id="newAlert" class="new-alert"></span>
+    </section>
+
+    <section class="kpis" id="kpis"></section>
+
+    <section class="grid">
+      <article class="card">
+        <h2 class="title">Тикеты поддержки</h2>
+        <div class="table-scroll table-scroll--large">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>★</th>
+                <th>Пользователь</th>
+                <th>Тема</th>
+                <th>Статус</th>
+                <th>Создан</th>
+              </tr>
+            </thead>
+            <tbody id="ticketRows"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Детали тикета</h2>
+        <div id="ticketDetail" class="meta">Выберите тикет</div>
+      </article>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2 class="title">Пользователи онлайн (последние 5 мин)</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>Пользователь</th>
+                <th>Источник</th>
+                <th>Последняя активность</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody id="onlineRows"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">История входов</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>Пользователь</th>
+                <th>Вход</th>
+                <th>Выход</th>
+                <th>Источник</th>
+              </tr>
+            </thead>
+            <tbody id="historyRows"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="split">
+      <article class="card">
+        <h2 class="title">Динамика тикетов (14 дней)</h2>
+        <svg id="trendChart" viewBox="0 0 1000 170" preserveAspectRatio="none"></svg>
+        <div id="trendMeta" class="meta trend-meta"></div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Частые темы и сигналы</h2>
+        <div id="faqList"></div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      tickets: [],
+      activity: { online_count: 0, online_users: [], recent_logins: [] },
+      selectedTicket: null,
+      chat: [],
+      chatUserId: null,
+      pinnedIds: new Set(),
+      pinnedOnly: false,
+      knownTicketIds: new Set(),
+    };
+
+    const el = {
+      kpis: document.getElementById("kpis"),
+      ticketRows: document.getElementById("ticketRows"),
+      ticketDetail: document.getElementById("ticketDetail"),
+      onlineRows: document.getElementById("onlineRows"),
+      historyRows: document.getElementById("historyRows"),
+      faqList: document.getElementById("faqList"),
+      trendChart: document.getElementById("trendChart"),
+      trendMeta: document.getElementById("trendMeta"),
+      searchInput: document.getElementById("searchInput"),
+      statusFilter: document.getElementById("statusFilter"),
+      statusText: document.getElementById("statusText"),
+      clock: document.getElementById("clock"),
+      pinnedToggle: document.getElementById("pinnedToggle"),
+      urgentBtn: document.getElementById("urgentBtn"),
+      newAlert: document.getElementById("newAlert"),
+    };
+
+    function csrfToken() {
+      const token = document.cookie
+        .split(";")
+        .map(x => x.trim())
+        .find(x => x.startsWith("csrftoken="));
+      return token ? decodeURIComponent(token.split("=")[1]) : "";
+    }
+
+    async function api(path, options = {}) {
+      const headers = {
+        "X-CSRFToken": csrfToken(),
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      };
+      const res = await fetch(path, { credentials: "same-origin", ...options, headers });
+      if (res.status === 403) throw new Error("403: нужен вход администратора");
+      if (res.status === 401) throw new Error("401: нет авторизации");
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      const ct = res.headers.get("content-type") || "";
+      return ct.includes("application/json") ? res.json() : res;
+    }
+
+    function fmt(v) {
+      if (!v) return "-";
+      const dt = new Date(v);
+      if (Number.isNaN(dt.getTime())) return "-";
+      return dt.toLocaleString("ru-RU", { hour12: false });
+    }
+
+    function esc(t) {
+      return String(t || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function setStatus(text, isOk = true) {
+      el.statusText.textContent = text;
+      el.statusText.style.borderColor = isOk ? "#d9e3ec" : "#f5d2d7";
+      el.statusText.style.color = isOk ? "#1d2a36" : "#b5485d";
+    }
+
+    function translateStatus(status) {
+      const map = {
+        open: "Открыт",
+        in_progress: "В работе",
+        answered: "Отвечен",
+        closed: "Закрыт",
+      };
+      return map[status] || status || "-";
+    }
+
+    function translateSource(source) {
+      const map = {
+        api: "API",
+        web_admin: "Веб-админ",
+        web_user: "Веб-пользователь",
+      };
+      return map[source] || source || "-";
+    }
+
+    function loadPinned() {
+      try {
+        const raw = JSON.parse(localStorage.getItem("admin_pinned_tickets") || "[]");
+        state.pinnedIds = new Set(Array.isArray(raw) ? raw.map(Number) : []);
+      } catch (_) {
+        state.pinnedIds = new Set();
+      }
+    }
+
+    function savePinned() {
+      localStorage.setItem("admin_pinned_tickets", JSON.stringify(Array.from(state.pinnedIds)));
+    }
+
+    function togglePinned(ticketId) {
+      if (state.pinnedIds.has(ticketId)) state.pinnedIds.delete(ticketId);
+      else state.pinnedIds.add(ticketId);
+      savePinned();
+      renderTickets();
+    }
+
+    function togglePinnedOnly() {
+      state.pinnedOnly = !state.pinnedOnly;
+      el.pinnedToggle.textContent = state.pinnedOnly ? "Показать все" : "Только закрепленные";
+      renderTickets();
+    }
+
+    function focusUrgentTicket() {
+      const urgent = state.tickets.find(t =>
+        (t.status === "open" || t.status === "in_progress") &&
+        t.created_at &&
+        (Date.now() - new Date(t.created_at).getTime()) > (6 * 60 * 60 * 1000)
+      );
+      if (!urgent) {
+        setStatus("Срочных тикетов нет");
+        return;
+      }
+      state.selectedTicket = urgent;
+      renderTickets();
+      renderTicketDetail();
+      setStatus(`Фокус на тикет #${urgent.id}`);
+    }
+
+    function deriveFaq(tickets) {
+      const map = new Map();
+      for (const t of tickets) {
+        const key = (t.subject || "Без темы").trim() || "Без темы";
+        map.set(key, (map.get(key) || 0) + 1);
+      }
+      return Array.from(map.entries())
+        .map(([subject, count]) => ({ subject, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 6);
+    }
+
+    function deriveTrend(tickets) {
+      const m = new Map();
+      for (const t of tickets) {
+        const day = (t.created_at || "").slice(0, 10);
+        if (!day) continue;
+        m.set(day, (m.get(day) || 0) + 1);
+      }
+      const days = [];
+      const now = new Date();
+      for (let i = 13; i >= 0; i -= 1) {
+        const d = new Date(now);
+        d.setDate(now.getDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        days.push({ key, count: m.get(key) || 0 });
+      }
+      return days;
+    }
+
+    function renderKpis() {
+      const total = state.tickets.length;
+      const online = state.activity.online_count || 0;
+      const byStatus = { open: 0, in_progress: 0, answered: 0, closed: 0 };
+      state.tickets.forEach(t => { byStatus[t.status] = (byStatus[t.status] || 0) + 1; });
+      const slaRisk = state.tickets.filter(t => {
+        if (t.status === "closed" || t.status === "answered") return false;
+        if (!t.created_at) return false;
+        return (Date.now() - new Date(t.created_at).getTime()) > (6 * 60 * 60 * 1000);
+      }).length;
+
+      const items = [
+        ["Тикеты", total],
+        ["Онлайн", online],
+        ["Открыт", byStatus.open || 0],
+        ["В работе", byStatus.in_progress || 0],
+        ["Отвечен", byStatus.answered || 0],
+        ["Риск по SLA", slaRisk],
+      ];
+
+      el.kpis.innerHTML = items.map(([l, v]) => `<div class="k"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+    }
+
+    function filteredTickets() {
+      const q = el.searchInput.value.trim().toLowerCase();
+      const st = el.statusFilter.value;
+      const filtered = state.tickets.filter(t => {
+        if (st !== "all" && t.status !== st) return false;
+        if (state.pinnedOnly && !state.pinnedIds.has(Number(t.id))) return false;
+        if (!q) return true;
+        return `${t.user_email} ${t.subject} ${t.message}`.toLowerCase().includes(q);
+      });
+      return filtered.sort((a, b) => {
+        const aPin = state.pinnedIds.has(Number(a.id)) ? 1 : 0;
+        const bPin = state.pinnedIds.has(Number(b.id)) ? 1 : 0;
+        if (aPin !== bPin) return bPin - aPin;
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      });
+    }
+
+    function renderTickets() {
+      const list = filteredTickets();
+      if (!list.length) {
+        el.ticketRows.innerHTML = `<tr><td colspan="6" class="meta">Тикеты не найдены</td></tr>`;
+        return;
+      }
+
+      el.ticketRows.innerHTML = list.map(t => `
+        <tr data-id="${t.id}" class="${state.selectedTicket && state.selectedTicket.id === t.id ? "active" : ""}">
+          <td>#${t.id}</td>
+          <td><button class="pin-btn ${state.pinnedIds.has(Number(t.id)) ? "active" : ""}" data-pin="${t.id}">★</button></td>
+          <td>${esc(t.user_email || "-")}</td>
+          <td>${esc(t.subject || "Без темы")}</td>
+          <td><span class="status-badge ${t.status}">${translateStatus(t.status)}</span></td>
+          <td>${fmt(t.created_at)}</td>
+        </tr>
+      `).join("");
+
+      el.ticketRows.querySelectorAll("tr[data-id]").forEach(row => {
+        row.addEventListener("click", () => {
+          const id = Number(row.dataset.id);
+          state.selectedTicket = state.tickets.find(x => x.id === id) || null;
+          renderTickets();
+          renderTicketDetail();
+        });
+      });
+      el.ticketRows.querySelectorAll("button[data-pin]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          togglePinned(Number(btn.dataset.pin));
+        });
+      });
+    }
+
+    function renderTicketDetail() {
+      const t = state.selectedTicket;
+      if (!t) {
+        el.ticketDetail.innerHTML = `<div class="meta">Выберите тикет</div>`;
+        return;
+      }
+      const ageHours = t.created_at ? ((Date.now() - new Date(t.created_at).getTime()) / 3600000) : 0;
+      const slaLabel = ageHours > 6 && (t.status === "open" || t.status === "in_progress")
+        ? `<span class="danger">Риск SLA: ${ageHours.toFixed(1)}h</span>`
+        : `<span class="warn">SLA в норме</span>`;
+
+      el.ticketDetail.innerHTML = `
+        <div class="detail-header">
+          <div><strong>#${t.id}</strong> | ${esc(t.user_email || "-")}</div>
+          <div>${slaLabel}</div>
+        </div>
+        <div class="meta">Создан: ${fmt(t.created_at)} | Обновлен: ${fmt(t.updated_at)}</div>
+        <div class="ticket-box detail-message">${esc(t.message || "")}</div>
+        <label class="meta detail-label" for="replyText">Ответ администратора</label>
+        <textarea id="replyText" placeholder="Введите ответ">${esc(t.admin_reply || "")}</textarea>
+        <div class="row detail-actions">
+          <select id="detailStatus">
+            <option value="open" ${t.status === "open" ? "selected" : ""}>Открыт</option>
+            <option value="in_progress" ${t.status === "in_progress" ? "selected" : ""}>В работе</option>
+            <option value="answered" ${t.status === "answered" ? "selected" : ""}>Отвечен</option>
+            <option value="closed" ${t.status === "closed" ? "selected" : ""}>Закрыт</option>
+          </select>
+          <button id="saveStatusBtn">Сохранить статус</button>
+          <button id="sendReplyBtn" class="primary">Отправить ответ</button>
+        </div>
+        <div class="chat-shell">
+          <div class="chat-shell__header">
+            <div>
+              <strong>Чат с пользователем</strong>
+              <div class="meta">Сообщения загружаются автоматически после выбора тикета.</div>
+            </div>
+            <button id="loadChatBtn">Обновить чат</button>
+          </div>
+          <div id="chatBox" class="chat"><div class="chat-empty">Загрузка сообщений...</div></div>
+          <div class="row chat-actions">
+            <input id="chatInput" class="chat-input" placeholder="Напишите короткий ответ пользователю" />
+            <button id="sendChatBtn" class="primary">Отправить в чат</button>
+          </div>
+        </div>
+      `;
+
+      document.getElementById("saveStatusBtn").addEventListener("click", saveStatus);
+      document.getElementById("sendReplyBtn").addEventListener("click", sendReply);
+      document.getElementById("loadChatBtn").addEventListener("click", () => loadChat());
+      document.getElementById("sendChatBtn").addEventListener("click", sendChat);
+      document.getElementById("chatInput").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          sendChat();
+        }
+      });
+
+      if (state.chatUserId === t.user_id) {
+        renderChat(state.chat);
+      } else {
+        state.chat = [];
+        state.chatUserId = null;
+        loadChat(true);
+      }
+    }
+
+    async function saveStatus() {
+      if (!state.selectedTicket) return;
+      const st = document.getElementById("detailStatus").value;
+      try {
+        const data = await api(`/api/admin/support/tickets/${state.selectedTicket.id}/`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: st })
+        });
+        Object.assign(state.selectedTicket, data);
+        const i = state.tickets.findIndex(x => x.id === data.id);
+        if (i >= 0) state.tickets[i] = data;
+        setStatus(`Ticket #${data.id} статус обновлен`);
+        renderAll();
+      } catch (err) {
+        setStatus(`Ошибка обновления статуса: ${err.message}`, false);
+      }
+    }
+
+    async function sendReply() {
+      if (!state.selectedTicket) return;
+      const txt = document.getElementById("replyText").value.trim();
+      if (!txt) {
+        setStatus("Ответ пустой", false);
+        return;
+      }
+      try {
+        const data = await api(`/api/admin/support/tickets/${state.selectedTicket.id}/`, {
+          method: "PATCH",
+          body: JSON.stringify({ admin_reply: txt })
+        });
+        Object.assign(state.selectedTicket, data);
+        const i = state.tickets.findIndex(x => x.id === data.id);
+        if (i >= 0) state.tickets[i] = data;
+        setStatus(`Ответ отправлен для #${data.id}`);
+        renderAll();
+      } catch (err) {
+        setStatus(`Ошибка ответа: ${err.message}`, false);
+      }
+    }
+
+    function renderChat(messages) {
+      const box = document.getElementById("chatBox");
+      if (!box) return;
+      if (!messages.length) {
+        box.innerHTML = `<div class="chat-empty">Сообщений пока нет. Начните диалог, чтобы пользователь увидел ответ в личном кабинете.</div>`;
+        return;
+      }
+      box.innerHTML = messages.map(m => `
+        <div class="bubble ${m.sender === "admin" ? "admin" : "user"}">
+          <div class="bubble__header">
+            <strong>${m.sender === "admin" ? "Вы" : "Пользователь"}</strong>
+            <span>${fmt(m.created_at)}</span>
+          </div>
+          <div class="bubble__text">${esc(m.message)}</div>
+        </div>
+      `).join("");
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadChat(silent = false) {
+      if (!state.selectedTicket) return;
+      try {
+        const data = await api(`/api/admin/support/chat/${state.selectedTicket.user_id}/`);
+        state.chat = Array.isArray(data.messages) ? data.messages : [];
+        state.chatUserId = state.selectedTicket.user_id;
+        renderChat(state.chat);
+        if (!silent) setStatus(`Чат пользователя #${state.selectedTicket.user_id} обновлен`);
+      } catch (err) {
+        setStatus(`Ошибка загрузки чата: ${err.message}`, false);
+      }
+    }
+
+    async function sendChat() {
+      if (!state.selectedTicket) return;
+      const input = document.getElementById("chatInput");
+      const txt = input.value.trim();
+      if (!txt) return;
+      try {
+        await api(`/api/admin/support/chat/${state.selectedTicket.user_id}/`, {
+          method: "POST",
+          body: JSON.stringify({ message: txt })
+        });
+        input.value = "";
+        await loadChat(true);
+        setStatus(`Сообщение отправлено пользователю #${state.selectedTicket.user_id}`);
+      } catch (err) {
+        setStatus(`Ошибка отправки в чат: ${err.message}`, false);
+      }
+    }
+
+    function renderActivity() {
+      const online = state.activity.online_users || [];
+      const history = state.activity.recent_logins || [];
+
+      el.onlineRows.innerHTML = online.length ? online.map(u => `
+        <tr>
+          <td>${esc(u.email)}</td>
+          <td>${esc(translateSource(u.source))}</td>
+          <td>${fmt(u.last_seen)}</td>
+          <td>${esc(u.ip_address || "-")}</td>
+        </tr>
+      `).join("") : `<tr><td colspan="4" class="meta">Пользователей онлайн нет</td></tr>`;
+
+      el.historyRows.innerHTML = history.length ? history.slice(0, 120).map(h => `
+        <tr>
+          <td>${esc(h.email)}</td>
+          <td>${fmt(h.login_at)}</td>
+          <td>${fmt(h.logout_at)}</td>
+          <td>${esc(translateSource(h.source))}</td>
+        </tr>
+      `).join("") : `<tr><td colspan="4" class="meta">История входов пуста</td></tr>`;
+    }
+
+    function renderTrendAndFaq() {
+      const days = deriveTrend(state.tickets);
+      const values = days.map(d => d.count);
+      const max = Math.max(...values, 1);
+      const W = 1000;
+      const H = 170;
+      const step = W / (days.length - 1);
+      const pts = values.map((v, i) => {
+        const x = i * step;
+        const y = H - (v / max) * (H - 24) - 10;
+        return [x, y];
+      });
+      const line = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p[0]} ${p[1]}`).join(" ");
+      const area = `${line} L ${W} ${H} L 0 ${H} Z`;
+      const total = values.reduce((a, b) => a + b, 0);
+
+      el.trendChart.innerHTML = `
+        <defs>
+          <linearGradient id="fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#5ed7ff" stop-opacity="0.35"></stop>
+            <stop offset="100%" stop-color="#5ed7ff" stop-opacity="0"></stop>
+          </linearGradient>
+        </defs>
+        <path d="${area}" fill="url(#fill)"></path>
+        <path d="${line}" fill="none" stroke="#67dcff" stroke-width="3"></path>
+      `;
+      el.trendMeta.textContent = `Последние 14 дней: ${total} тикетов | Пик за день: ${Math.max(...values)}`;
+
+      const faq = deriveFaq(state.tickets);
+      const unresolved = state.tickets.filter(t => t.status === "open" || t.status === "in_progress").length;
+      const resolvedRate = state.tickets.length
+        ? Math.round(((state.tickets.length - unresolved) / state.tickets.length) * 100)
+        : 0;
+
+      el.faqList.innerHTML = `
+        <div class="faq-item"><strong>Доля решенных обращений:</strong> ${resolvedRate}%</div>
+        <div class="faq-item"><strong>Неразобранные обращения:</strong> ${unresolved}</div>
+        ${faq.map((f, i) => `<div class="faq-item"><strong>${i + 1}. ${esc(f.subject)}</strong><div class="meta">${f.count} тикетов</div></div>`).join("")}
+      `;
+    }
+
+    function renderAll() {
+      if (!state.selectedTicket && state.tickets.length) state.selectedTicket = state.tickets[0];
+      renderKpis();
+      renderTickets();
+      renderTicketDetail();
+      renderActivity();
+      renderTrendAndFaq();
+    }
+
+    async function loadData() {
+      try {
+        setStatus("Загрузка...");
+        const [tickets, activity] = await Promise.all([
+          api("/api/admin/support/tickets/"),
+          api("/api/admin/user-activity/")
+        ]);
+        const incoming = Array.isArray(tickets) ? tickets : [];
+        const nextIds = new Set(incoming.map(t => Number(t.id)));
+        let freshCount = 0;
+        if (state.knownTicketIds.size > 0) {
+          nextIds.forEach((id) => {
+            if (!state.knownTicketIds.has(id)) freshCount += 1;
+          });
+        }
+        state.knownTicketIds = nextIds;
+        state.tickets = incoming;
+        state.activity = activity || { online_count: 0, online_users: [], recent_logins: [] };
+        if (state.selectedTicket) {
+          state.selectedTicket = state.tickets.find(t => t.id === state.selectedTicket.id) || state.tickets[0] || null;
+        }
+        renderAll();
+        if (freshCount > 0) {
+          el.newAlert.style.display = "inline-block";
+          el.newAlert.textContent = `Новые тикеты: +${freshCount}`;
+        } else {
+          el.newAlert.style.display = "none";
+          el.newAlert.textContent = "";
+        }
+        setStatus(`Обновлено: ${state.tickets.length} тикетов, ${state.activity.online_count || 0} пользователей онлайн`);
+      } catch (err) {
+        setStatus(`Ошибка загрузки: ${err.message}`, false);
+      }
+    }
+
+    async function exportCsv() {
+      try {
+        setStatus("Экспорт CSV...");
+        const res = await fetch("/api/admin/support/tickets/export/", { credentials: "same-origin" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "support_tickets.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        setStatus("CSV экспортирован");
+      } catch (err) {
+        setStatus(`Ошибка экспорта: ${err.message}`, false);
+      }
+    }
+
+    function bindEvents() {
+      document.getElementById("refreshBtn").addEventListener("click", loadData);
+      document.getElementById("exportBtn").addEventListener("click", exportCsv);
+      el.pinnedToggle.addEventListener("click", togglePinnedOnly);
+      el.urgentBtn.addEventListener("click", focusUrgentTicket);
+      el.searchInput.addEventListener("input", renderTickets);
+      el.statusFilter.addEventListener("change", renderTickets);
+      setInterval(loadData, 60000);
+    }
+
+    function startClock() {
+      const tick = () => {
+        el.clock.textContent = `${new Date().toLocaleString("ru-RU", { hour12: false })} | онлайн`;
+      };
+      tick();
+      setInterval(tick, 1000);
+    }
+
+    loadPinned();
+    bindEvents();
+    startClock();
+    loadData();
+  </script>
+</body>
+</html>

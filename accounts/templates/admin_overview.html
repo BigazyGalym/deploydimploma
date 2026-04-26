@@ -1,0 +1,284 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Админка - Обзор</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+</head>
+<body>
+  <main class="wrap">
+    <section class="top">
+      <div>
+        <h1>Обзор</h1>
+        <p class="sub">Краткий срез по обращениям, пользователям и текущей активности системы.</p>
+      </div>
+      <div class="nav">
+        <a href="/dashboard/overview/" class="is-active">Обзор</a>
+        <a href="/dashboard/tickets/">Тикеты</a>
+        <a href="/dashboard/activity/">Активность</a>
+        <a href="/dashboard/users/">Пользователи</a>
+        <a href="/support/">Портал поддержки</a>
+        <form action="/dashboard/logout/" method="post" class="inline-form">
+          {% csrf_token %}
+          <button type="submit" class="secondary-button">Выйти</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card row">
+      <button id="refresh">Обновить</button>
+      <span id="status" class="status">Готово</span>
+      <span id="clock" class="status"></span>
+    </section>
+
+    <section id="kpis" class="kpis"></section>
+
+    <section class="grid">
+      <article class="card">
+        <h2 class="title">Последние тикеты</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Тема</th>
+                <th>Статус</th>
+                <th>Создан</th>
+              </tr>
+            </thead>
+            <tbody id="ticketRows"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Новые пользователи</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Имя</th>
+                <th>Дата регистрации</th>
+              </tr>
+            </thead>
+            <tbody id="userRows"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2 class="title">Тренд обращений за 14 дней</h2>
+        <svg id="trend" class="trend" viewBox="0 0 1000 180" preserveAspectRatio="none"></svg>
+        <div id="trendText" class="sub trend-meta"></div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Пользователи онлайн</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Источник</th>
+                <th>Последняя активность</th>
+              </tr>
+            </thead>
+            <tbody id="onlineRows"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const el = {
+      refresh: document.getElementById("refresh"),
+      status: document.getElementById("status"),
+      clock: document.getElementById("clock"),
+      kpis: document.getElementById("kpis"),
+      ticketRows: document.getElementById("ticketRows"),
+      userRows: document.getElementById("userRows"),
+      trend: document.getElementById("trend"),
+      trendText: document.getElementById("trendText"),
+      onlineRows: document.getElementById("onlineRows"),
+    };
+
+    const state = { tickets: [], users: [], activity: { online_count: 0, online_users: [] } };
+
+    const fmt = (v) => {
+      if (!v) return "-";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime()) ? "-" : d.toLocaleString("ru-RU", { hour12: false });
+    };
+
+    const esc = (s) => String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+    function statusLabel(value) {
+      const map = {
+        open: "Открыт",
+        in_progress: "В работе",
+        answered: "Отвечен",
+        closed: "Закрыт",
+      };
+      return map[value] || value || "-";
+    }
+
+    function sourceLabel(value) {
+      const map = {
+        api: "API",
+        web_admin: "Веб-админ",
+        web_user: "Веб-пользователь",
+      };
+      return map[value] || value || "-";
+    }
+
+    async function get(url) {
+      const r = await fetch(url, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }
+
+    function setStatus(text, ok = true) {
+      el.status.textContent = text;
+      el.status.style.color = ok ? "#1d2a36" : "#b5485d";
+      el.status.style.borderColor = ok ? "#d9e3ec" : "#f5d2d7";
+    }
+
+    function renderKpis() {
+      const byStatus = { open: 0, in_progress: 0, answered: 0, closed: 0 };
+      state.tickets.forEach((t) => { byStatus[t.status] = (byStatus[t.status] || 0) + 1; });
+
+      const cards = [
+        ["Тикеты", state.tickets.length],
+        ["Открыто", byStatus.open || 0],
+        ["В работе", byStatus.in_progress || 0],
+        ["Отвечено", byStatus.answered || 0],
+        ["Пользователи", state.users.length],
+        ["Онлайн", state.activity.online_count || 0],
+      ];
+
+      el.kpis.innerHTML = cards.map(([label, value]) => `
+        <div class="k">
+          <div class="l">${label}</div>
+          <div class="v">${value}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderTables() {
+      el.ticketRows.innerHTML = state.tickets.slice(0, 30).map((t) => `
+        <tr>
+          <td>#${t.id}</td>
+          <td>${esc(t.user_email || "-")}</td>
+          <td>${esc(t.subject || "Без темы")}</td>
+          <td><span class="status-badge ${t.status}">${statusLabel(t.status)}</span></td>
+          <td>${fmt(t.created_at)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="empty-cell">Нет данных</td></tr>`;
+
+      el.userRows.innerHTML = state.users.slice(0, 30).map((u) => `
+        <tr>
+          <td>#${u.id}</td>
+          <td>${esc(u.email)}</td>
+          <td>${esc(`${u.first_name || ""} ${u.last_name || ""}`.trim() || "-")}</td>
+          <td>${fmt(u.date_joined)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4" class="empty-cell">Нет данных</td></tr>`;
+
+      el.onlineRows.innerHTML = (state.activity.online_users || []).slice(0, 40).map((u) => `
+        <tr>
+          <td>${esc(u.email)}</td>
+          <td>${esc(sourceLabel(u.source))}</td>
+          <td>${fmt(u.last_seen)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="3" class="empty-cell">Нет пользователей онлайн</td></tr>`;
+    }
+
+    function renderTrend() {
+      const stats = new Map();
+      state.tickets.forEach((t) => {
+        const key = (t.created_at || "").slice(0, 10);
+        if (!key) return;
+        stats.set(key, (stats.get(key) || 0) + 1);
+      });
+
+      const days = [];
+      const now = new Date();
+      for (let i = 13; i >= 0; i -= 1) {
+        const d = new Date(now);
+        d.setDate(now.getDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        days.push({ key, count: stats.get(key) || 0 });
+      }
+
+      const values = days.map((item) => item.count);
+      const max = Math.max(...values, 1);
+      const width = 1000;
+      const height = 180;
+      const step = width / (days.length - 1);
+      const points = values.map((value, index) => [index * step, height - (value / max) * (height - 26) - 12]);
+      const line = points.map((point, index) => `${index ? "L" : "M"} ${point[0]} ${point[1]}`).join(" ");
+      const area = `${line} L ${width} ${height} L 0 ${height} Z`;
+
+      el.trend.innerHTML = `
+        <defs>
+          <linearGradient id="overviewTrend" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#1f6fe5" stop-opacity="0.26"></stop>
+            <stop offset="100%" stop-color="#1f6fe5" stop-opacity="0"></stop>
+          </linearGradient>
+        </defs>
+        <path d="${area}" fill="url(#overviewTrend)"></path>
+        <path d="${line}" fill="none" stroke="#1f6fe5" stroke-width="3"></path>
+      `;
+      el.trendText.textContent = `За 14 дней получено ${values.reduce((sum, value) => sum + value, 0)} обращений.`;
+    }
+
+    function renderAll() {
+      renderKpis();
+      renderTables();
+      renderTrend();
+    }
+
+    async function load() {
+      try {
+        setStatus("Загрузка...");
+        const [tickets, users, activity] = await Promise.all([
+          get("/api/admin/support/tickets/"),
+          get("/api/admin/users/"),
+          get("/api/admin/user-activity/"),
+        ]);
+        state.tickets = Array.isArray(tickets) ? tickets : [];
+        state.users = Array.isArray(users) ? users : [];
+        state.activity = activity || { online_count: 0, online_users: [] };
+        renderAll();
+        setStatus("Данные обновлены");
+      } catch (e) {
+        setStatus(`Ошибка: ${e.message}`, false);
+      }
+    }
+
+    function startClock() {
+      const tick = () => {
+        el.clock.textContent = new Date().toLocaleString("ru-RU", { hour12: false });
+      };
+      tick();
+      setInterval(tick, 1000);
+    }
+
+    el.refresh.addEventListener("click", load);
+    setInterval(load, 60000);
+    startClock();
+    load();
+  </script>
+</body>
+</html>

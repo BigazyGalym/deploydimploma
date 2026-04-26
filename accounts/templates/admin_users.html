@@ -1,0 +1,225 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Админка - Пользователи</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+</head>
+<body>
+  <main class="wrap">
+    <section class="top">
+      <div>
+        <h1>Пользователи</h1>
+        <p class="sub">Профили пользователей, контакты, активность и история обращений.</p>
+      </div>
+      <div class="nav">
+        <a href="/dashboard/overview/">Обзор</a>
+        <a href="/dashboard/tickets/">Тикеты</a>
+        <a href="/dashboard/activity/">Активность</a>
+        <a href="/dashboard/users/" class="is-active">Пользователи</a>
+        <a href="/support/">Портал поддержки</a>
+        <form action="/dashboard/logout/" method="post" class="inline-form">
+          {% csrf_token %}
+          <button type="submit" class="secondary-button">Выйти</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card row">
+      <button id="refresh">Обновить</button>
+      <input id="search" class="grow-input" placeholder="Поиск по email, имени или телефону" />
+      <select id="kind">
+        <option value="all">Все пользователи</option>
+        <option value="staff">Только администраторы</option>
+        <option value="active">Только активные</option>
+      </select>
+      <span id="status" class="status">Готово</span>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2 class="title">Список пользователей</h2>
+        <div class="table-scroll table-scroll--large">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Имя</th>
+                <th>Телефон</th>
+                <th>Тикеты</th>
+                <th>Статус</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Профиль пользователя</h2>
+        <div id="detail" class="meta">Выберите пользователя из списка.</div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const el = {
+      refresh: document.getElementById("refresh"),
+      search: document.getElementById("search"),
+      kind: document.getElementById("kind"),
+      status: document.getElementById("status"),
+      rows: document.getElementById("rows"),
+      detail: document.getElementById("detail"),
+    };
+
+    const state = { users: [], selected: null, detail: null };
+
+    const fmt = (value) => {
+      if (!value) return "-";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("ru-RU", { hour12: false });
+    };
+
+    const esc = (value) => String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+    function statusLabel(value) {
+      const map = {
+        open: "Открыт",
+        in_progress: "В работе",
+        answered: "Отвечен",
+        closed: "Закрыт",
+      };
+      return map[value] || value || "-";
+    }
+
+    function senderLabel(value) {
+      const map = {
+        user: "Пользователь",
+        admin: "Администратор",
+      };
+      return map[value] || value || "-";
+    }
+
+    function setStatus(text, ok = true) {
+      el.status.textContent = text;
+      el.status.style.borderColor = ok ? "#d9e3ec" : "#f5d2d7";
+      el.status.style.color = ok ? "#1d2a36" : "#b5485d";
+    }
+
+    async function get(url) {
+      const response = await fetch(url, { credentials: "same-origin" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+
+    function filteredUsers() {
+      const query = el.search.value.trim().toLowerCase();
+      const kind = el.kind.value;
+      return state.users.filter((user) => {
+        if (kind === "staff" && !user.is_staff) return false;
+        if (kind === "active" && !user.is_active) return false;
+        if (!query) return true;
+        return `${user.email} ${user.first_name || ""} ${user.last_name || ""} ${user.phone || ""}`.toLowerCase().includes(query);
+      });
+    }
+
+    function renderRows() {
+      const list = filteredUsers();
+      el.rows.innerHTML = list.map((user) => {
+        const isActive = user.is_active ? '<span class="tag on">Активен</span>' : '<span class="tag off">Неактивен</span>';
+        const isStaff = user.is_staff ? ' <span class="tag staff">Админ</span>' : '';
+        return `
+          <tr data-id="${user.id}" class="${state.selected === user.id ? "active" : ""}">
+            <td>#${user.id}</td>
+            <td>${esc(user.email)}</td>
+            <td>${esc(`${user.first_name || ""} ${user.last_name || ""}`.trim() || "-")}</td>
+            <td>${esc(user.phone || "-")}</td>
+            <td>${user.tickets_count || 0}</td>
+            <td>${isActive}${isStaff}</td>
+          </tr>
+        `;
+      }).join("") || '<tr><td colspan="6" class="empty-cell">Нет пользователей</td></tr>';
+
+      el.rows.querySelectorAll("tr[data-id]").forEach((row) => {
+        row.addEventListener("click", async () => {
+          state.selected = Number(row.dataset.id);
+          renderRows();
+          await loadDetail(state.selected);
+        });
+      });
+    }
+
+    function renderDetail() {
+      if (!state.detail) {
+        el.detail.innerHTML = '<div class="meta">Выберите пользователя из списка.</div>';
+        return;
+      }
+
+      const user = state.detail.user;
+      const tickets = state.detail.recent_tickets || [];
+      const messages = state.detail.recent_messages || [];
+
+      el.detail.innerHTML = `
+        <div class="row" style="margin-bottom:8px; align-items:flex-start;">
+          ${user.profile_photo ? `<img class="avatar" src="${esc(user.profile_photo)}" alt="Аватар" />` : '<div class="avatar" style="display:grid;place-items:center;">Нет фото</div>'}
+          <div>
+            <div style="font-weight:700; font-size:16px;">${esc(`${user.first_name || ""} ${user.last_name || ""}`.trim() || "Без имени")}</div>
+            <div class="meta">${esc(user.email)}</div>
+          </div>
+        </div>
+
+        <div class="kv"><div class="label">Телефон</div><div>${esc(user.phone || "-")}</div></div>
+        <div class="kv"><div class="label">Регистрация</div><div>${fmt(user.date_joined)}</div></div>
+        <div class="kv"><div class="label">Последний вход</div><div>${fmt(user.last_login)}</div></div>
+        <div class="kv"><div class="label">Статус</div><div>${user.is_active ? "Активен" : "Неактивен"}${user.is_staff ? ", администратор" : ""}</div></div>
+
+        <h3 class="title" style="font-size:18px; margin-top:18px;">Последние тикеты</h3>
+        <div class="msgs">${tickets.map((ticket) => `<div class="msg"><strong>#${ticket.id}</strong> ${esc(ticket.subject || "Без темы")} <span class="meta">(${esc(statusLabel(ticket.status))})</span></div>`).join("") || '<div class="meta">Нет тикетов</div>'}</div>
+
+        <h3 class="title" style="font-size:18px; margin-top:18px;">Последние сообщения</h3>
+        <div class="msgs">${messages.map((message) => `<div class="msg"><strong>${esc(senderLabel(message.sender))}</strong>: ${esc(message.message)}</div>`).join("") || '<div class="meta">Нет сообщений</div>'}</div>
+      `;
+    }
+
+    async function load() {
+      try {
+        setStatus("Загрузка...");
+        const users = await get("/api/admin/users/");
+        state.users = Array.isArray(users) ? users : [];
+        if (state.selected && !state.users.some((user) => user.id === state.selected)) {
+          state.selected = null;
+          state.detail = null;
+        }
+        renderRows();
+        renderDetail();
+        setStatus(`Пользователей: ${state.users.length}`);
+      } catch (e) {
+        setStatus(`Ошибка: ${e.message}`, false);
+      }
+    }
+
+    async function loadDetail(id) {
+      try {
+        setStatus(`Загрузка профиля #${id}...`);
+        state.detail = await get(`/api/admin/users/${id}/`);
+        renderDetail();
+        setStatus(`Профиль #${id} открыт`);
+      } catch (e) {
+        setStatus(`Ошибка профиля: ${e.message}`, false);
+      }
+    }
+
+    el.refresh.addEventListener("click", load);
+    el.search.addEventListener("input", renderRows);
+    el.kind.addEventListener("change", renderRows);
+    setInterval(load, 90000);
+    load();
+  </script>
+</body>
+</html>

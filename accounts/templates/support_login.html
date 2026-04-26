@@ -1,0 +1,49 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Вход в поддержку</title>
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <main class="auth-page">
+    <section class="auth-card">
+      <div class="auth-card__intro">
+        <span class="auth-badge">Поддержка</span>
+        <h1>Вход в поддержку</h1>
+        <p>Войдите, чтобы отправить вопрос, следить за тикетами и быстро общаться с администратором.</p>
+      </div>
+
+      <form class="auth-form" method="post">
+        {% csrf_token %}
+
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" type="email" name="email" placeholder="you@example.com" autocomplete="email" required />
+        </div>
+
+        <div class="field">
+          <label for="password">Пароль</label>
+          <input id="password" type="password" name="password" placeholder="Введите пароль" autocomplete="current-password" required />
+        </div>
+
+        {% if error %}
+          <div class="error" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <button type="submit">Открыть портал</button>
+      </form>
+
+      <div class="auth-footer">
+        <span>Для сотрудников есть отдельная админ-панель.</span>
+        <a href="/admin-login/">Вход администратора</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

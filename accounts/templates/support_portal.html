@@ -1,0 +1,168 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Портал поддержки</title>
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <main class="support-layout">
+    <section class="panel hero">
+      <div>
+        <span class="hero-badge">Портал поддержки</span>
+        <h1>Портал поддержки</h1>
+        <p class="muted">Оставляйте подробные вопросы в тикетах и используйте чат для быстрых уточнений.</p>
+      </div>
+      <div class="hero-actions">
+        <div class="user-card">
+          <span class="user-card__label">Вы вошли как</span>
+          <strong>{{ request.user.email }}</strong>
+        </div>
+        <form method="post" action="/support/logout/">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-secondary">Выйти</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="summary-grid">
+      <article class="summary-card">
+        <span class="summary-card__label">Тикетов всего</span>
+        <strong>{{ tickets|length }}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="summary-card__label">Сообщений в чате</span>
+        <strong>{{ messages|length }}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="summary-card__label">Последний тикет</span>
+        <strong>{% if tickets %}#{{ tickets.0.id }}{% else %}Нет{% endif %}</strong>
+      </article>
+    </section>
+
+    <section class="support-grid">
+      <article class="panel">
+        <div class="section-heading">
+          <h2>Новый тикет</h2>
+          <p>Опишите проблему подробно, чтобы администратор быстрее понял задачу.</p>
+        </div>
+        <form method="post" class="stack-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="create_ticket" />
+
+          <div class="field">
+            <label for="subject">Тема</label>
+            <input id="subject" type="text" name="subject" placeholder="Например: Не проходит платеж" />
+          </div>
+
+          <div class="field">
+            <label for="message">Сообщение</label>
+            <textarea id="message" name="message" placeholder="Опишите, что произошло и что вы уже пробовали сделать..." required></textarea>
+          </div>
+
+          <button type="submit" class="btn btn-primary">Отправить тикет</button>
+        </form>
+      </article>
+
+      <article class="panel chat-panel">
+        <div class="section-heading">
+          <h2>Чат с поддержкой</h2>
+          <p>Пишите короткие сообщения и уточнения. История переписки хранится ниже.</p>
+        </div>
+
+        <div class="chat-feed">
+          {% for msg in messages %}
+            <article class="chat-message {{ msg.sender }}">
+              <div class="chat-message__header">
+                <strong>{% if msg.sender == "user" %}Вы{% else %}Поддержка{% endif %}</strong>
+                <span>{{ msg.created_at|date:"d.m.Y H:i" }}</span>
+              </div>
+              <div class="chat-message__text">{{ msg.message|linebreaksbr }}</div>
+            </article>
+          {% empty %}
+            <div class="chat-empty">Сообщений пока нет. Напишите первое сообщение, если нужен быстрый ответ.</div>
+          {% endfor %}
+        </div>
+
+        <form method="post" class="chat-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="send_chat" />
+          <label class="sr-only" for="chat_message">Сообщение в чат</label>
+          <input id="chat_message" type="text" name="chat_message" placeholder="Напишите сообщение в поддержку" required />
+          <button type="submit" class="btn btn-primary">Отправить</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="section-heading">
+        <h2>Мои тикеты</h2>
+        <p>Здесь можно посмотреть статус обращения и при необходимости закрыть его.</p>
+      </div>
+
+      <div class="table-wrap">
+        <table class="tickets-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Тема</th>
+              <th>Статус</th>
+              <th>Ответ администратора</th>
+              <th>Создан</th>
+              <th>Действие</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ticket in tickets %}
+              <tr>
+                <td>#{{ ticket.id }}</td>
+                <td>{{ ticket.subject|default:"Без темы" }}</td>
+                <td>
+                  <span class="status-pill {{ ticket.status }}">
+                    {% if ticket.status == "open" %}
+                      Открыт
+                    {% elif ticket.status == "in_progress" %}
+                      В работе
+                    {% elif ticket.status == "answered" %}
+                      Отвечен
+                    {% elif ticket.status == "closed" %}
+                      Закрыт
+                    {% else %}
+                      {{ ticket.status }}
+                    {% endif %}
+                  </span>
+                </td>
+                <td>
+                  <div class="reply-box">{{ ticket.admin_reply|default:"Ответ пока не добавлен."|linebreaksbr }}</div>
+                </td>
+                <td>{{ ticket.created_at|date:"d.m.Y H:i" }}</td>
+                <td>
+                  {% if ticket.status != "closed" %}
+                    <form method="post">
+                      {% csrf_token %}
+                      <input type="hidden" name="action" value="close_ticket" />
+                      <input type="hidden" name="ticket_id" value="{{ ticket.id }}" />
+                      <button type="submit" class="btn btn-secondary btn-small">Закрыть</button>
+                    </form>
+                  {% else %}
+                    <span class="muted">Уже закрыт</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="6" class="empty-cell">Тикетов пока нет.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

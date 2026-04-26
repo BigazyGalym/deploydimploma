@@ -1,0 +1,221 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Админка - Активность</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{% static 'styles/css/unified_portal.css' %}">
+</head>
+<body>
+  <main class="wrap">
+    <section class="top">
+      <div>
+        <h1>Активность</h1>
+        <p class="sub">Мониторинг входов, источников авторизации и активности пользователей по часам.</p>
+      </div>
+      <div class="nav">
+        <a href="/dashboard/overview/">Обзор</a>
+        <a href="/dashboard/tickets/">Тикеты</a>
+        <a href="/dashboard/activity/" class="is-active">Активность</a>
+        <a href="/dashboard/users/">Пользователи</a>
+        <a href="/support/">Портал поддержки</a>
+        <form action="/dashboard/logout/" method="post" class="inline-form">
+          {% csrf_token %}
+          <button type="submit" class="secondary-button">Выйти</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card row">
+      <button id="refresh">Обновить</button>
+      <select id="source">
+        <option value="all">Все источники</option>
+        <option value="api">API</option>
+        <option value="web_admin">Веб-админ</option>
+        <option value="web_user">Веб-пользователь</option>
+      </select>
+      <input id="search" class="grow-input" placeholder="Поиск по email или IP" />
+      <span id="status" class="status">Готово</span>
+    </section>
+
+    <section id="kpis" class="kpis"></section>
+
+    <section class="grid">
+      <article class="card">
+        <h2 class="title">Пользователи онлайн</h2>
+        <div class="table-scroll table-scroll--medium">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Источник</th>
+                <th>Последняя активность</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody id="onlineRows"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2 class="title">Тепловая карта за 24 часа</h2>
+        <div id="heat" class="heat"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2 class="title">История входов</h2>
+      <div class="table-scroll table-scroll--large">
+        <table>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Вход</th>
+              <th>Выход</th>
+              <th>Источник</th>
+              <th>IP</th>
+            </tr>
+          </thead>
+          <tbody id="historyRows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const el = {
+      refresh: document.getElementById("refresh"),
+      source: document.getElementById("source"),
+      search: document.getElementById("search"),
+      status: document.getElementById("status"),
+      kpis: document.getElementById("kpis"),
+      onlineRows: document.getElementById("onlineRows"),
+      historyRows: document.getElementById("historyRows"),
+      heat: document.getElementById("heat"),
+    };
+
+    const state = { activity: { online_count: 0, online_users: [], recent_logins: [] } };
+
+    const fmt = (value) => {
+      if (!value) return "-";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("ru-RU", { hour12: false });
+    };
+
+    const esc = (value) => String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+    function sourceLabel(value) {
+      const map = {
+        api: "API",
+        web_admin: "Веб-админ",
+        web_user: "Веб-пользователь",
+      };
+      return map[value] || value || "-";
+    }
+
+    function setStatus(text, ok = true) {
+      el.status.textContent = text;
+      el.status.style.borderColor = ok ? "#d9e3ec" : "#f5d2d7";
+      el.status.style.color = ok ? "#1d2a36" : "#b5485d";
+    }
+
+    async function load() {
+      try {
+        setStatus("Загрузка...");
+        const response = await fetch("/api/admin/user-activity/", { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.activity = await response.json();
+        renderAll();
+        setStatus(`Онлайн: ${state.activity.online_count || 0}`);
+      } catch (e) {
+        setStatus(`Ошибка: ${e.message}`, false);
+      }
+    }
+
+    function filtered(list) {
+      const source = el.source.value;
+      const query = el.search.value.trim().toLowerCase();
+      return list.filter((item) => {
+        if (source !== "all" && item.source !== source) return false;
+        if (!query) return true;
+        return `${item.email} ${item.ip_address || ""}`.toLowerCase().includes(query);
+      });
+    }
+
+    function renderKpis() {
+      const history = state.activity.recent_logins || [];
+      const webCount = history.filter((item) => item.source !== "api").length;
+      const apiCount = history.filter((item) => item.source === "api").length;
+      const activeCount = (state.activity.online_users || []).length;
+      const items = [
+        ["Онлайн", activeCount],
+        ["Логины", history.length],
+        ["Веб", webCount],
+        ["API", apiCount],
+      ];
+      el.kpis.innerHTML = items.map(([label, value]) => `
+        <div class="k">
+          <div class="l">${label}</div>
+          <div class="v">${value}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderTables() {
+      const online = filtered(state.activity.online_users || []);
+      const history = filtered(state.activity.recent_logins || []).slice(0, 400);
+
+      el.onlineRows.innerHTML = online.map((user) => `
+        <tr>
+          <td>${esc(user.email)}</td>
+          <td>${esc(sourceLabel(user.source))}</td>
+          <td>${fmt(user.last_seen)}</td>
+          <td>${esc(user.ip_address || "-")}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4" class="empty-cell">Нет данных</td></tr>`;
+
+      el.historyRows.innerHTML = history.map((item) => `
+        <tr>
+          <td>${esc(item.email)}</td>
+          <td>${fmt(item.login_at)}</td>
+          <td>${fmt(item.logout_at)}</td>
+          <td>${esc(sourceLabel(item.source))}</td>
+          <td>${esc(item.ip_address || "-")}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="empty-cell">Нет данных</td></tr>`;
+    }
+
+    function renderHeat() {
+      const bins = new Array(24).fill(0);
+      (state.activity.recent_logins || []).forEach((item) => {
+        if (!item.login_at) return;
+        const hour = new Date(item.login_at).getHours();
+        if (!Number.isNaN(hour)) bins[hour] += 1;
+      });
+
+      const max = Math.max(...bins, 1);
+      el.heat.innerHTML = bins.map((count, hour) => {
+        const opacity = 0.16 + (count / max) * 0.84;
+        return `<div style="background: rgba(31, 111, 229, ${opacity})" title="${hour}:00 — ${count}">${count}</div>`;
+      }).join("");
+    }
+
+    function renderAll() {
+      renderKpis();
+      renderTables();
+      renderHeat();
+    }
+
+    el.refresh.addEventListener("click", load);
+    el.search.addEventListener("input", renderTables);
+    el.source.addEventListener("change", renderTables);
+    setInterval(load, 60000);
+    load();
+  </script>
+</body>
+</html>
