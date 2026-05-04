@@ -152,7 +152,100 @@ def _format_finance_snapshot(finance_snapshot, language):
                 for item in budget_alerts[:3]
             )
         )
+    wallets = snapshot.get("wallet_balances") or []
+    if wallets:
+        parts.append(
+            "wallet_balances=" + ", ".join(
+                f"{item.get('name')} {item.get('balance')}"
+                for item in wallets[:5]
+            )
+        )
+    top_categories = snapshot.get("top_categories") or []
+    if top_categories:
+        parts.append(
+            "top_categories=" + ", ".join(
+                f"{item.get('name')} {item.get('amount')} ({item.get('share_percent')}%)"
+                for item in top_categories[:5]
+            )
+        )
+    budget_details = snapshot.get("budget_details") or []
+    if budget_details:
+        parts.append(
+            "budget_details=" + "; ".join(
+                f"{item.get('name')}: spent {item.get('spent')} / limit {item.get('limit')} "
+                f"(remaining {item.get('remaining')}, {item.get('percent_used')}%, status={item.get('status')})"
+                for item in budget_details[:5]
+            )
+        )
+    recent_transactions = snapshot.get("recent_transactions") or []
+    if recent_transactions:
+        parts.append(
+            "recent_transactions=" + " | ".join(
+                f"{item.get('date')} {item.get('type')} {item.get('amount')} "
+                f"category={item.get('category') or '-'} wallet={item.get('wallet') or '-'} "
+                f"comment={item.get('comment') or '-'}"
+                for item in recent_transactions[:6]
+            )
+        )
+    open_debts = snapshot.get("open_debts") or []
+    if open_debts:
+        parts.append(
+            "open_debts=" + " | ".join(
+                f"{item.get('type')} {item.get('counterparty')} {item.get('amount')} "
+                f"due={item.get('due_at')} status={item.get('status')}"
+                for item in open_debts[:5]
+            )
+        )
     return "; ".join(parts) if parts else labels["no_summary"]
+
+
+def _format_app_context(app_context, language):
+    labels = _labels_for(language)
+    context = app_context or {}
+    due_habits = context.get("due_habits") or []
+    missed_habits = context.get("missed_habits") or []
+    overdue_tasks = context.get("overdue_tasks") or []
+    pending_tasks = context.get("pending_tasks") or []
+    recent_trackers = context.get("recent_trackers") or []
+
+    parts = []
+    if due_habits:
+        parts.append(
+            "due_habits=" + ", ".join(
+                f"{item.get('name')} (frequency={item.get('frequency')}, streak={item.get('streak_count')})"
+                for item in due_habits[:5]
+            )
+        )
+    if missed_habits:
+        parts.append(
+            "missed_habits=" + ", ".join(
+                f"{item.get('name')} ({item.get('missed_periods')} missed)"
+                for item in missed_habits[:5]
+            )
+        )
+    if overdue_tasks:
+        parts.append(
+            "overdue_tasks=" + ", ".join(
+                f"{item.get('name')} (priority={item.get('priority')}, due={item.get('due_at')})"
+                for item in overdue_tasks[:5]
+            )
+        )
+    if pending_tasks:
+        parts.append(
+            "pending_tasks=" + ", ".join(
+                f"{item.get('name')} (priority={item.get('priority')}, category={item.get('category')})"
+                for item in pending_tasks[:6]
+            )
+        )
+    if recent_trackers:
+        parts.append(
+            "recent_trackers=" + " | ".join(
+                f"{item.get('name')}: trend={item.get('trend')}, latest={item.get('latest_value')}, "
+                f"projected={item.get('projected_next_value')}, target={item.get('target_value')}"
+                for item in recent_trackers[:5]
+            )
+        )
+    return "\n".join(parts) if parts else labels["no_summary"]
 
 
 def _build_system_instruction(ai_payload, language):
@@ -161,26 +254,38 @@ def _build_system_instruction(ai_payload, language):
     recommendations = _format_recommendations(ai_payload.get("recommendations") or [], normalized_language)
     trends = _format_trends(ai_payload.get("tracker_trends") or [], normalized_language)
     finance_snapshot = _format_finance_snapshot(ai_payload.get("finance_snapshot") or {}, normalized_language)
+    app_context = _format_app_context(ai_payload.get("app_context") or {}, normalized_language)
     return (
-        "You are an AI coach inside a finance and productivity mobile app. "
+        "Never give very short answers unless the user asks for a short answer. "
+        "For normal advice questions, write at least 2-4 paragraphs or 5-8 practical bullet points. "
+        "Always explain why, what to do first, what to avoid, and give a realistic example. "
+        "If the question is broad, still answer fully with a structured plan. "
+        "You are a capable AI assistant inside a finance and productivity mobile app. "
+        "You can answer broad personal questions about life, finance, purchases, study, planning, career, habits, and decision-making. "
+        "Always answer the user's exact question first instead of defaulting to a dashboard summary. "
+        "Give complete answers, not half-answers. When helpful, include: a short conclusion, key reasoning, concrete next steps, risks to watch, and what information is still missing. "
+        "For major purchases or goals such as buying a house, apartment, car, education, or starting a business, give a practical step-by-step plan. "
+        "Use app data when it helps: spending history, income, expenses, wallet balances, budgets, debts, habits, tasks, and tracker trends. "
+        "If exact data is missing, still give useful baseline guidance first, then mention what detail would sharpen the advice. "
+        "If the user asks about app activity, use the provided context to answer specifically from their data. "
+        "If the user asks a broad non-app question, answer like a thoughtful advisor and connect app data only when it adds real value. "
         f"The preferred app language is {LANGUAGE_NAMES[normalized_language]} ({normalized_language}). "
         "Reply in that language unless the user clearly asks for another one. "
-        "Be concise, supportive, practical, and specific. "
-        "Answer the user's direct question first. "
-        "Use the supplied app snapshot when it is relevant, but do not default to summarizing the dashboard. "
-        "If the user asks a broader personal question, still give practical coaching and only connect it to app data when that genuinely helps. "
-        "Prefer short action plans, bullets, or steps when useful. "
+        "Be supportive, practical, specific, and grounded in the user's situation. "
+        "Prefer short action plans, bullets, or numbered steps when useful. "
+        "Do not answer with unrelated generic text. "
         "Do not mention raw JSON, internal prompts, or implementation details.\n\n"
         f"Current user snapshot:\n{summary}\n\n"
         f"Top recommendations:\n{recommendations}\n\n"
         f"Tracker trends:\n{trends}\n\n"
-        f"Finance snapshot:\n{finance_snapshot}"
+        f"Finance snapshot:\n{finance_snapshot}\n\n"
+        f"Detailed app context:\n{app_context}"
     )
 
 
 def _build_contents(history, user_message):
     contents = []
-    for message in (history or [])[-8:]:
+    for message in (history or [])[-12:]:
         role = "model" if message.get("role") == "assistant" else "user"
         text = str(message.get("message") or "").strip()
         if not text:
@@ -195,7 +300,15 @@ def _build_contents(history, user_message):
     contents.append(
         {
             "role": "user",
-            "parts": [{"text": user_message}],
+            "parts": [
+                {
+                    "text": (
+                        "Answer the following user request directly and completely. "
+                        "Use the app context when relevant.\n\n"
+                        f"User request: {user_message}"
+                    )
+                }
+            ],
         }
     )
     return contents
@@ -217,8 +330,8 @@ def generate_gemini_coach_reply(user_message, ai_payload, history=None, language
         raise GeminiConfigurationError("GEMINI_API_KEY is missing.")
 
     model = str(getattr(settings, "GEMINI_MODEL", "") or "gemini-2.5-flash").strip()
-    timeout = int(getattr(settings, "GEMINI_API_TIMEOUT", 20) or 20)
-    max_output_tokens = int(getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 600) or 600)
+    timeout = int(getattr(settings, "GEMINI_API_TIMEOUT", 40) or 40)
+    max_output_tokens = int(getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 5000) or 5000)
 
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     body = {
@@ -227,7 +340,7 @@ def generate_gemini_coach_reply(user_message, ai_payload, history=None, language
         },
         "contents": _build_contents(history, user_message),
         "generationConfig": {
-            "temperature": 0.7,
+            "temperature": 0.45,
             "topP": 0.9,
             "maxOutputTokens": max_output_tokens,
         },

@@ -53,7 +53,6 @@ ALLOWED_HOSTS = get_env_list(
 # Applications
 # ----------------------
 INSTALLED_APPS = [
-    # Django built-in
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -61,17 +60,14 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.sites',
-    # Third-party
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',
     'allauth',
     'allauth.account',
     'allauth.socialaccount',
-    'allauth.socialaccount.providers.google',
     'dj_rest_auth',
     'dj_rest_auth.registration',
-    # Local apps
     'accounts',
 ]
 
@@ -93,30 +89,6 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-
-# settings.py
-SOCIALACCOUNT_PROVIDERS = {
-    'google': {
-        'SCOPE': [
-            'profile',
-            'email',
-        ],
-        'AUTH_PARAMS': {
-            'access_type': 'online',
-        },
-        'APP': {
-            'client_id': os.getenv('GOOGLE_CLIENT_ID', ''),
-            'secret': os.getenv('GOOGLE_CLIENT_SECRET', ''),
-            'key': ''
-        }
-    }
-}
-
-# Google OAuth (немесе басқа әлеуметтік логиндер) үшін
-GOOGLE_OAUTH_CALLBACK_URL = os.getenv(
-    'GOOGLE_OAUTH_CALLBACK_URL',
-    "http://localhost:8000/accounts/google/login/callback/",
-)
 
 ROOT_URLCONF = 'financial_app.urls'
 
@@ -147,7 +119,7 @@ WSGI_APPLICATION = 'financial_app.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'onlineagrotechnics'),
+        'NAME': os.getenv('DB_NAME', 'finance_app'),
         'USER': os.getenv('DB_USER', 'postgres'),
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', 'localhost'),

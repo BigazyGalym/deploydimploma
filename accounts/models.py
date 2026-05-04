@@ -1,4 +1,5 @@
 # accounts/models.py
+import calendar
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.conf import settings
@@ -7,7 +8,6 @@ from datetime import date
 import datetime
 import uuid
 
-# ---------------- USER ----------------
 class UserManager(BaseUserManager):
     use_in_migrations = True
 
@@ -30,6 +30,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=15, null=True, blank=True)
     profile_photo = models.ImageField(upload_to="profiles/", null=True, blank=True)
+    is_support_agent = models.BooleanField(default=False)
     is_limit_subscription_active = models.BooleanField(default=False)
     limit_subscription_started_at = models.DateTimeField(null=True, blank=True)
     limit_subscription_cancelled_at = models.DateTimeField(null=True, blank=True)
@@ -57,6 +58,39 @@ PREMIUM_LIMIT_CATEGORY_NAMES = {
     "travel",
 }
 
+DEFAULT_EXPENSE_CATEGORY_NAMES = {
+    "кафе",
+    "cafe",
+    "развлечение",
+    "entertainment",
+    "ойын-сауық",
+    "одежда",
+    "clothes",
+    "киім",
+    "продукты",
+    "groceries",
+    "азық-түлік",
+    "транспорт",
+    "transport",
+    "көлік",
+    "еда",
+    "food",
+    "тамақ",
+    "обучение",
+    "education",
+    "оқу",
+    "секции",
+    "sections",
+    "үйірмелер",
+    "подарок другу",
+    "gift to friend",
+    "досқа сыйлық",
+} | PREMIUM_LIMIT_CATEGORY_NAMES
+
+FREE_CUSTOM_EXPENSE_CATEGORY_LIMIT = 8
+LIMIT_SUBSCRIPTION_CUSTOM_SLOT_LIMIT = 8
+LIMIT_SUBSCRIPTION_DURATION_MONTHS = 1
+
 
 def normalize_limit_category_name(value):
     return str(value or "").strip().casefold()
@@ -65,10 +99,97 @@ def normalize_limit_category_name(value):
 def is_premium_limit_category_name(value):
     return normalize_limit_category_name(value) in PREMIUM_LIMIT_CATEGORY_NAMES
 
+
+def is_default_expense_category_name(value):
+    return normalize_limit_category_name(value) in DEFAULT_EXPENSE_CATEGORY_NAMES
+
+
+def shift_datetime_by_months(value, months=1):
+    if value is None:
+        return None
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+def get_limit_subscription_expires_at(user):
+    started_at = getattr(user, "limit_subscription_started_at", None)
+    if not started_at:
+        return None
+    return shift_datetime_by_months(started_at, LIMIT_SUBSCRIPTION_DURATION_MONTHS)
+
+
+def get_month_date_range(reference_date=None):
+    reference_date = reference_date or timezone.localdate()
+    start_date = reference_date.replace(day=1)
+    end_date = (
+        (start_date.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        - datetime.timedelta(days=1)
+    )
+    return start_date, end_date
+
+
+def get_week_date_range(reference_date=None):
+    reference_date = reference_date or timezone.localdate()
+    start_date = reference_date - datetime.timedelta(days=reference_date.weekday())
+    end_date = start_date + datetime.timedelta(days=6)
+    return start_date, end_date
+
+
+def get_budget_date_range(period_type, reference_date=None, start_date=None, end_date=None):
+    normalized_period = str(period_type or "month").strip().casefold()
+    reference_date = reference_date or timezone.localdate()
+
+    if normalized_period == "month":
+        return get_month_date_range(reference_date)
+    if normalized_period == "week":
+        return get_week_date_range(reference_date)
+    if normalized_period == "custom":
+        resolved_start = start_date or reference_date
+        resolved_end = end_date or resolved_start
+        return resolved_start, resolved_end
+
+    raise ValueError(f"Unsupported budget period type: {period_type}")
+
+
+def has_active_limit_subscription(user, now=None):
+    if not user or not getattr(user, "is_limit_subscription_active", False):
+        return False
+
+    expires_at = get_limit_subscription_expires_at(user)
+    if not expires_at:
+        return False
+
+    now = now or timezone.now()
+    return expires_at > now
+
+
+def sync_limit_subscription_state(user, now=None):
+    if not user:
+        return False
+
+    now = now or timezone.now()
+    active_now = has_active_limit_subscription(user, now=now)
+    if getattr(user, "is_limit_subscription_active", False) and not active_now:
+        expires_at = get_limit_subscription_expires_at(user)
+        user.is_limit_subscription_active = False
+        if not getattr(user, "limit_subscription_cancelled_at", None):
+            user.limit_subscription_cancelled_at = expires_at or now
+        user.save(
+            update_fields=[
+                "is_limit_subscription_active",
+                "limit_subscription_cancelled_at",
+            ]
+        )
+    return active_now
+
 # ---------------- CATEGORY ----------------
 class Category(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True)
     name = models.CharField(max_length=50)
+    is_limit_subscription_premium = models.BooleanField(default=False)
 
     def __str__(self):
         return self.name
@@ -100,6 +221,13 @@ class Transaction(models.Model):
     def __str__(self):
         return f"{self.type} | {self.category} | {self.amount}"
 
+
+def exclude_debt_related_transactions(queryset):
+    return queryset.filter(
+        issued_debts__isnull=True,
+        returned_debts__isnull=True,
+    ).distinct()
+
 # ---------------- BUDGET ----------------
 class Budget(models.Model):
     PERIOD_CHOICES = (
@@ -124,6 +252,13 @@ class Debt(models.Model):
         ("borrowed", "Borrowed"),
     )
     user = models.ForeignKey(User, on_delete=models.CASCADE)
+    wallet = models.ForeignKey(
+        Wallet,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="debts",
+    )
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     counterparty = models.CharField(max_length=100)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -132,6 +267,20 @@ class Debt(models.Model):
     due_date = models.DateField()
     due_time = models.TimeField(default=datetime.time(18, 0))
     returned = models.BooleanField(default=False)
+    issued_transaction = models.ForeignKey(
+        Transaction,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="issued_debts",
+    )
+    returned_transaction = models.ForeignKey(
+        Transaction,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="returned_debts",
+    )
 
     def __str__(self):
         return f"{self.type} — {self.counterparty} — {self.amount} ({self.issued_date} {self.issued_time})"

@@ -3,8 +3,8 @@ from django.urls import path
 from .views import (
     RegisterView, LoginView, FinanceView,
     WalletCreateView, TransactionView, TransactionDetailView,
-    LogoutView, GoogleLoginView, user_profile,
-    BudgetCreateView, DebtCreateView, DebtDetailView, WalletDetailView, BudgetDetailView,
+    LogoutView, user_profile,
+    BudgetCreateView, DebtCreateView, DebtDetailView, WalletDetailView, BudgetDetailView, BudgetHistoryView,
     CategoryCreateView, CategoryDetailView,
     LimitSubscriptionChallengeView, LimitSubscriptionActivateView, LimitSubscriptionCancelView,
     VerifyEmailCodeView, ResendVerificationCodeView,
@@ -35,6 +35,7 @@ urlpatterns = [
     path('transaction/<int:pk>/', TransactionDetailView.as_view(), name='transaction_detail'),
     path('budget/', BudgetCreateView.as_view(), name='budget_create'),
     path('budget/<int:pk>/', BudgetDetailView.as_view(), name='budget_detail'),
+    path('budget/history/', BudgetHistoryView.as_view(), name='budget_history'),
     path('limit-subscription/challenge/', LimitSubscriptionChallengeView.as_view(), name='limit_subscription_challenge'),
     path('limit-subscription/activate/', LimitSubscriptionActivateView.as_view(), name='limit_subscription_activate'),
     path('limit-subscription/cancel/', LimitSubscriptionCancelView.as_view(), name='limit_subscription_cancel'),
@@ -63,7 +64,6 @@ urlpatterns = [
     path('admin/users/', AdminUsersView.as_view(), name='admin_users'),
     path('admin/users/<int:user_id>/', AdminUserDetailView.as_view(), name='admin_user_detail'),
     path('logout/', LogoutView.as_view(), name='logout'),
-    path('google-login/', GoogleLoginView.as_view(), name='google_login'),
     path('user/', user_profile),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 ]

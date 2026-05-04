@@ -17,7 +17,7 @@ from django.shortcuts import render, redirect
 from django.views.decorators.http import require_http_methods
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
@@ -33,6 +33,7 @@ from .models import (
     SupportTicket,
     SupportChatMessage,
     UserLoginActivity,
+    exclude_debt_related_transactions,
     is_premium_limit_category_name,
 )
 from .serializers import (
@@ -143,6 +144,24 @@ def _is_staff(user):
     return bool(user and user.is_authenticated and user.is_staff)
 
 
+def _is_support_agent(user):
+    return bool(user and user.is_authenticated and getattr(user, "is_support_agent", False))
+
+
+def _can_access_support_desk(user):
+    return bool(user and user.is_authenticated and (user.is_staff or getattr(user, "is_support_agent", False)))
+
+
+class IsSupportAgentOrAdmin(BasePermission):
+    def has_permission(self, request, view):
+        return _can_access_support_desk(getattr(request, "user", None))
+
+
+class IsFullAdminUser(BasePermission):
+    def has_permission(self, request, view):
+        return _is_staff(getattr(request, "user", None))
+
+
 def _clear_limit_subscription_challenge(user):
     user.limit_subscription_challenge = ""
     user.limit_subscription_answer = None
@@ -173,23 +192,88 @@ def _build_limit_subscription_challenge():
     return f"{left} {operator} {right}", answer
 
 
+def _category_requires_limit_subscription(category):
+    if not category:
+        return False
+    return (
+        is_premium_limit_category_name(getattr(category, "name", ""))
+        or bool(getattr(category, "is_limit_subscription_premium", False))
+    )
+
+
+def _get_visible_budgets(user, queryset):
+    budgets = list(queryset)
+    if user.is_limit_subscription_active:
+        return budgets
+    return [
+        budget
+        for budget in budgets
+        if not _category_requires_limit_subscription(getattr(budget, "category", None))
+    ]
+
+
+def _safe_expense_queryset(queryset):
+    try:
+        return exclude_debt_related_transactions(queryset)
+    except (ProgrammingError, OperationalError):
+        return queryset
+
+
+def _serialize_budget_summary(request, budgets):
+    try:
+        serialized = BudgetSerializer(
+            budgets,
+            many=True,
+            context={"request": request},
+        ).data
+    except (ProgrammingError, OperationalError):
+        return [], Decimal("0"), Decimal("0")
+
+    total_limit = sum((budget.limit or Decimal("0") for budget in budgets), Decimal("0"))
+    total_spent = sum(
+        (Decimal(str(budget.get("spent") or 0)) for budget in serialized),
+        Decimal("0"),
+    )
+    return serialized, total_limit, total_spent
+
+
+def _build_top_category(expense_queryset, total_spent):
+    leader = (
+        expense_queryset
+        .filter(category__isnull=False)
+        .values("category__id", "category__name")
+        .annotate(amount=Sum("amount"))
+        .order_by("-amount", "category__name")
+        .first()
+    )
+    if not leader:
+        return None
+
+    share_percent = 0.0
+    if total_spent:
+        share_percent = round(float((leader["amount"] / total_spent) * Decimal("100")), 1)
+
+    return {
+        "id": leader["category__id"],
+        "name": leader["category__name"],
+        "amount": leader["amount"] or Decimal("0"),
+        "share_percent": share_percent,
+    }
+
+
 @require_http_methods(["GET"])
 def root_entry_view(request):
     if _is_staff(request.user):
         return redirect("admin_dashboard")
+    if _is_support_agent(request.user):
+        return redirect("admin_tickets")
     return redirect("admin_login")
 
 class HomeView(APIView):
     def get(self, request):
         return Response({"message": "Welcome to your dashboard!"})
 
-# =========================
-# Google Login
-# =========================
-class GoogleLoginView(SocialLoginView):
-    adapter_class = GoogleOAuth2Adapter
-    callback_url = settings.GOOGLE_OAUTH_CALLBACK_URL  # From settings or .env
-    client_class = OAuth2Client
+
 
 # =========================
 # Register
@@ -344,35 +428,35 @@ class ForgotPasswordConfirmView(APIView):
 
 # =========================
 # Finance Dashboard
-# =========================
+
 class FinanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
-        today = date.today()
+        today = timezone.localdate()
 
-        transactions = Transaction.objects.filter(
+        transactions = _safe_expense_queryset(Transaction.objects.filter(
             user=user,
             date__year=today.year,
             date__month=today.month
-        )
+        ))
 
-        # ---------------- INCOME ----------------
+        
         income = (
             transactions.filter(type="income")
             .aggregate(total=Sum("amount"))["total"]
             or 0
         )
 
-        # ---------------- EXPENSES ----------------
+        
         expenses = (
             transactions.filter(type="expense")
             .aggregate(total=Sum("amount"))["total"]
             or 0
         )
 
-        # ---------------- EXPENSES BY CATEGORY ----------------
+        
         category_qs = (
             transactions.filter(type="expense", category__isnull=False)
             .values("category__id", "category__name")
@@ -395,25 +479,15 @@ class FinanceView(APIView):
         ).data
 
         # ---------------- BUDGETS ----------------
-        budgets_qs = Budget.objects.filter(user=user).select_related("category")
-        if user.is_limit_subscription_active:
-            visible_budgets = list(budgets_qs)
-        else:
-            visible_budgets = [
-                budget
-                for budget in budgets_qs
-                if not is_premium_limit_category_name(getattr(budget.category, "name", ""))
-            ]
-        budgets = BudgetSerializer(
+        budgets_qs = Budget.objects.filter(
+            user=user,
+            start_date__lte=today,
+            end_date__gte=today,
+        ).select_related("category")
+        visible_budgets = _get_visible_budgets(user, budgets_qs)
+        budgets, total_limit, total_spent = _serialize_budget_summary(
+            request,
             visible_budgets,
-            many=True,
-            context={"request": request}
-        ).data
-
-        total_limit = sum((budget.limit or 0) for budget in visible_budgets)
-        total_spent = sum(
-            (Decimal(str(budget.get("spent") or 0)) for budget in budgets),
-            Decimal("0"),
         )
 
         # ---------------- DEBTS ----------------
@@ -563,6 +637,63 @@ class BudgetDetailView(APIView):
             return Response({"detail": "Not found"}, status=404)
         budget.delete()
         return Response(status=204)
+
+
+class BudgetHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        period_type = str(request.query_params.get("period_type") or "month").strip().casefold()
+        valid_period_types = {choice[0] for choice in Budget.PERIOD_CHOICES}
+        if period_type not in valid_period_types:
+            return Response({"detail": "Unsupported period type."}, status=400)
+
+        raw_limit = str(request.query_params.get("limit") or "6").strip()
+        try:
+            history_limit = int(raw_limit)
+        except ValueError:
+            return Response({"detail": "Limit must be a whole number."}, status=400)
+
+        if history_limit < 1:
+            return Response({"detail": "Limit must be at least 1."}, status=400)
+
+        budgets_qs = Budget.objects.filter(
+            user=request.user,
+            period_type=period_type,
+        ).select_related("category")
+        visible_budgets = _get_visible_budgets(request.user, budgets_qs)
+
+        period_totals = {}
+        for budget in visible_budgets:
+            key = (budget.start_date, budget.end_date)
+            period_totals[key] = period_totals.get(key, Decimal("0")) + (budget.limit or Decimal("0"))
+
+        history = []
+        for start_date, end_date in sorted(period_totals.keys(), reverse=True)[:history_limit]:
+            expense_queryset = _safe_expense_queryset(
+                Transaction.objects.filter(
+                    user=request.user,
+                    type="expense",
+                    date__range=(start_date, end_date),
+                )
+            )
+            total_spent = expense_queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+            history.append(
+                {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "total_limit": period_totals[(start_date, end_date)],
+                    "total_spent": total_spent,
+                    "top_category": _build_top_category(expense_queryset, total_spent),
+                }
+            )
+
+        return Response(
+            {
+                "period_type": period_type,
+                "history": history,
+            }
+        )
 
 
 class LimitSubscriptionChallengeView(APIView):
@@ -768,6 +899,11 @@ class DebtDetailView(APIView):
 class CategoryCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        categories = Category.objects.filter(user=request.user)
+        serializer = CategorySerializer(categories, many=True)
+        return Response(serializer.data)
+
     def post(self, request):
         serializer = CategorySerializer(data=request.data)
         if serializer.is_valid():
@@ -916,7 +1052,7 @@ class SupportChatMessageView(APIView):
 
 
 class AdminSupportTicketView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsSupportAgentOrAdmin]
 
     def get(self, request):
         status_filter = str(request.query_params.get("status") or "").strip()
@@ -935,7 +1071,7 @@ class AdminSupportTicketView(APIView):
 
 
 class AdminSupportTicketDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsSupportAgentOrAdmin]
 
     def patch(self, request, pk):
         ticket = SupportTicket.objects.select_related("user").filter(pk=pk).first()
@@ -970,7 +1106,7 @@ class AdminSupportTicketDetailView(APIView):
 
 
 class AdminSupportChatView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsSupportAgentOrAdmin]
 
     def get(self, request, user_id):
         user = User.objects.filter(pk=user_id).first()
@@ -1011,7 +1147,7 @@ class AdminSupportChatView(APIView):
 
 
 class AdminUserActivityView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsFullAdminUser]
 
     def get(self, request):
         try:
@@ -1069,7 +1205,7 @@ class AdminUserActivityView(APIView):
 
 
 class AdminSupportTicketExportView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsFullAdminUser]
 
     def get(self, request):
         response = HttpResponse(content_type="text/csv")
@@ -1110,7 +1246,7 @@ class AdminSupportTicketExportView(APIView):
 
 
 class AdminUsersView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsFullAdminUser]
 
     def get(self, request):
         q = str(request.query_params.get("q") or "").strip().lower()
@@ -1138,6 +1274,7 @@ class AdminUsersView(APIView):
                     "last_name": u.last_name,
                     "phone": u.phone,
                     "profile_photo": u.profile_photo.url if u.profile_photo else None,
+                    "is_support_agent": u.is_support_agent,
                     "is_staff": u.is_staff,
                     "is_active": u.is_active,
                     "date_joined": u.date_joined,
@@ -1150,7 +1287,7 @@ class AdminUsersView(APIView):
 
 
 class AdminUserDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsFullAdminUser]
 
     def get(self, request, user_id):
         user = User.objects.filter(pk=user_id).first()
@@ -1175,6 +1312,7 @@ class AdminUserDetailView(APIView):
                     "last_name": user.last_name,
                     "phone": user.phone,
                     "profile_photo": user.profile_photo.url if user.profile_photo else None,
+                    "is_support_agent": user.is_support_agent,
                     "is_staff": user.is_staff,
                     "is_active": user.is_active,
                     "date_joined": user.date_joined,
@@ -1190,6 +1328,8 @@ class AdminUserDetailView(APIView):
 def admin_login_view(request):
     if _is_staff(request.user):
         return redirect("admin_dashboard")
+    if _is_support_agent(request.user):
+        return redirect("admin_tickets")
 
     error = ""
     if request.method == "POST":
@@ -1211,10 +1351,14 @@ def admin_dashboard_view(request):
     return render(request, "admin_overview.html")
 
 
-@login_required(login_url="/admin-login/")
-@user_passes_test(_is_staff, login_url="/admin-login/")
+@login_required(login_url="/support/login/")
+@user_passes_test(_can_access_support_desk, login_url="/support/login/")
 def admin_tickets_view(request):
-    return render(request, "admin_tickets.html")
+    return render(
+        request,
+        "admin_tickets.html",
+        {"support_only": not request.user.is_staff},
+    )
 
 
 @login_required(login_url="/admin-login/")
@@ -1239,27 +1383,38 @@ def admin_logout_view(request):
 
 @require_http_methods(["GET", "POST"])
 def support_login_view(request):
-    if request.user.is_authenticated and not request.user.is_staff:
+    if request.user.is_authenticated:
+        if _can_access_support_desk(request.user):
+            return redirect("admin_tickets")
         return redirect("support_portal")
 
     error = ""
     if request.method == "POST":
         email = str(request.POST.get("email") or "").strip().lower()
         password = str(request.POST.get("password") or "")
+        user_by_email = User.objects.filter(email=email).first()
+
+        if user_by_email and not user_by_email.is_active:
+            error = "Email әлі расталмаған. Алдымен аккаунтты verify етіп алыңыз."
+            return render(request, "support_login.html", {"error": error})
+
         user = authenticate(request, email=email, password=password)
-        if user and not user.is_staff:
+        if user and _can_access_support_desk(user):
             auth_login(request, user)
-            _open_login_activity(user, request, source="web_user")
-            return redirect("support_portal")
-        error = "Неверные учетные данные пользователя."
+            _open_login_activity(user, request, source="web_admin")
+            return redirect("admin_tickets")
+        if user:
+            error = "Бұл логин тек техподдержка қызметкерлеріне арналған."
+        else:
+            error = "Неверные учетные данные пользователя."
 
     return render(request, "support_login.html", {"error": error})
 
 
 @login_required(login_url="/support/login/")
 def support_portal_view(request):
-    if request.user.is_staff:
-        return redirect("admin_dashboard")
+    if _can_access_support_desk(request.user):
+        return redirect("admin_tickets")
 
     if request.method == "POST":
         action = str(request.POST.get("action") or "").strip()

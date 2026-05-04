@@ -8,7 +8,17 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 from .gemini_client import GeminiConfigurationError, GeminiServiceError, generate_gemini_coach_reply
-from .models import AIAssistantMessage, Budget, Debt, Habit, Task, Tracker, Transaction
+from .models import (
+    AIAssistantMessage,
+    Budget,
+    Debt,
+    Habit,
+    Task,
+    Tracker,
+    Transaction,
+    Wallet,
+    exclude_debt_related_transactions,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -173,6 +183,9 @@ AI_COPY = {
         "reply_finance_debt_due_soon": (
             "{count} debts are due soon. Line up the payment now or warn the counterparty early if you need to adjust the timing."
         ),
+        "reply_finance_debt_position": (
+            "You currently have {lent_count} open lent debts totaling {lent_amount} and {borrowed_count} open borrowed debts totaling {borrowed_amount}. Keep the next due date visible so cash flow stays predictable."
+        ),
         "reply_finance_debt_clear": (
             "You do not have urgent debt deadlines right now. This is a good time to plan the next repayment before it becomes stressful."
         ),
@@ -335,6 +348,9 @@ AI_COPY = {
         ),
         "reply_finance_debt_due_soon": (
             "{count} долгов скоро подойдут к сроку. Лучше заранее подготовить платеж или предупредить вторую сторону, если нужно сдвинуть дату."
+        ),
+        "reply_finance_debt_position": (
+            "Сейчас у вас {lent_count} открытых выданных долгов на сумму {lent_amount} и {borrowed_count} открытых взятых долгов на сумму {borrowed_amount}. Держите ближайшую дату возврата на виду, чтобы денежный поток оставался предсказуемым."
         ),
         "reply_finance_debt_clear": (
             "Сейчас срочных долговых сроков нет. Это хороший момент заранее спланировать следующий возврат, пока ситуация спокойная."
@@ -499,6 +515,9 @@ AI_COPY = {
         "reply_finance_debt_due_soon": (
             "{count} қарыздың мерзімі жақындап тұр. Төлемді қазірден дайындаңыз немесе уақытты жылжыту керек болса, алдын ала хабар беріңіз."
         ),
+        "reply_finance_debt_position": (
+            "Қазір сізде жалпы {lent_amount} сомасына {lent_count} ашық берілген қарыз және {borrowed_amount} сомасына {borrowed_count} ашық алынған қарыз бар. Ақша ағымы болжамды болу үшін келесі қайтару күнін көз алдыңызда ұстаңыз."
+        ),
         "reply_finance_debt_clear": (
             "Қазір шұғыл қарыз мерзімдері жоқ. Бұл келесі қайтаруды алдын ала жоспарлауға жақсы уақыт."
         ),
@@ -532,6 +551,15 @@ def _tr(language, key, **kwargs):
     normalized_language = _normalize_language(language)
     template = AI_COPY[normalized_language].get(key) or AI_COPY["en"].get(key) or key
     return template.format(**kwargs) if kwargs else template
+
+
+def _localized_text(language, *, en, ru, kz):
+    normalized_language = _normalize_language(language)
+    if normalized_language == "ru":
+        return ru
+    if normalized_language == "kz":
+        return kz
+    return en
 
 
 GENERAL_COACHING_RULES = [
@@ -803,23 +831,31 @@ def _combine_debt_due_at(debt):
 
 
 def _budget_spent_amount(user, budget):
-    queryset = Transaction.objects.filter(
-        user=user,
-        type="expense",
-        date__range=(budget.start_date, budget.end_date),
+    queryset = exclude_debt_related_transactions(
+        Transaction.objects.filter(
+            user=user,
+            type="expense",
+            date__range=(budget.start_date, budget.end_date),
+        )
     )
     if budget.category_id:
         queryset = queryset.filter(category=budget.category)
     return queryset.aggregate(total=Sum("amount"))["total"] or Decimal("0")
 
 
-def build_finance_snapshot(user, reference_date=None):
+def build_finance_snapshot(user, reference_date=None, language="en"):
+    language = _normalize_language(language)
     today = reference_date or timezone.localdate()
     now = timezone.now()
-    month_transactions = Transaction.objects.filter(
-        user=user,
-        date__year=today.year,
-        date__month=today.month,
+    month_transactions = exclude_debt_related_transactions(
+        Transaction.objects.filter(
+            user=user,
+            date__year=today.year,
+            date__month=today.month,
+        )
+    )
+    all_transactions = exclude_debt_related_transactions(
+        Transaction.objects.filter(user=user).select_related("wallet", "category")
     )
 
     month_income = month_transactions.filter(type="income").aggregate(total=Sum("amount"))["total"] or Decimal("0")
@@ -842,6 +878,18 @@ def build_finance_snapshot(user, reference_date=None):
             "amount": _round_number(leader["amount"]),
             "share_percent": share_percent,
         }
+    top_categories = []
+    for item in category_totals[:5]:
+        share_percent = 0.0
+        if month_expenses:
+            share_percent = round(float((item["amount"] / month_expenses) * Decimal("100")), 1)
+        top_categories.append(
+            {
+                "name": item["category__name"],
+                "amount": _round_number(item["amount"]),
+                "share_percent": share_percent,
+            }
+        )
 
     active_budgets = list(
         Budget.objects.filter(user=user, start_date__lte=today, end_date__gte=today).select_related("category")
@@ -849,6 +897,7 @@ def build_finance_snapshot(user, reference_date=None):
     budget_alerts = []
     over_budget_count = 0
     near_budget_count = 0
+    budget_details = []
 
     for budget in active_budgets:
         spent = _budget_spent_amount(user, budget)
@@ -857,51 +906,187 @@ def build_finance_snapshot(user, reference_date=None):
             percent_used = round(float((spent / budget.limit) * Decimal("100")), 1)
 
         severity = None
+        status = "ok"
         if budget.limit and spent > budget.limit:
             severity = "high"
+            status = "over"
             over_budget_count += 1
         elif budget.limit and percent_used >= 85:
             severity = "medium"
+            status = "near"
             near_budget_count += 1
+
+        limit_value = _round_number(budget.limit)
+        spent_value = _round_number(spent)
+        remaining_value = _round_number((budget.limit or Decimal("0")) - spent)
+        budget_details.append(
+            {
+                "name": _budget_label(budget, language),
+                "limit": limit_value,
+                "spent": spent_value,
+                "remaining": remaining_value,
+                "percent_used": percent_used,
+                "status": status,
+                "start_date": budget.start_date.isoformat(),
+                "end_date": budget.end_date.isoformat(),
+            }
+        )
 
         if severity:
             budget_alerts.append(
                 {
-                    "name": _budget_label(budget, "en"),
-                    "limit": _round_number(budget.limit),
-                    "spent": _round_number(spent),
+                    "name": _budget_label(budget, language),
+                    "limit": limit_value,
+                    "spent": spent_value,
                     "percent_used": percent_used,
                     "severity": severity,
                 }
             )
 
     budget_alerts.sort(key=lambda item: (0 if item["severity"] == "high" else 1, -item["percent_used"]))
+    budget_details.sort(
+        key=lambda item: (
+            0 if item["status"] == "over" else 1 if item["status"] == "near" else 2,
+            -item["percent_used"],
+        )
+    )
+
+    wallet_balances = [
+        {
+            "name": wallet.name,
+            "balance": _round_number(wallet.balance),
+        }
+        for wallet in Wallet.objects.filter(user=user).order_by("-balance", "name")[:6]
+    ]
+
+    recent_transactions = []
+    for item in all_transactions.order_by("-date", "-time")[:8]:
+        recent_transactions.append(
+            {
+                "type": item.type,
+                "amount": _round_number(item.amount),
+                "category": item.category.name if item.category_id and item.category else None,
+                "wallet": item.wallet.name if item.wallet_id and item.wallet else None,
+                "date": item.date.isoformat() if item.date else None,
+                "time": item.time.isoformat() if item.time else None,
+                "comment": item.comment or "",
+            }
+        )
 
     open_debts = list(Debt.objects.filter(user=user, returned=False))
     overdue_debts = []
     due_soon_debts = []
+    open_lent_debts = []
+    open_borrowed_debts = []
+    open_debt_items = []
     for debt in open_debts:
+        if debt.type == "lent":
+            open_lent_debts.append(debt)
+        elif debt.type == "borrowed":
+            open_borrowed_debts.append(debt)
         due_at = _combine_debt_due_at(debt)
+        debt_status = "open"
         if due_at < now:
             overdue_debts.append(debt)
+            debt_status = "overdue"
         elif due_at <= now + datetime.timedelta(hours=24):
             due_soon_debts.append(debt)
+            debt_status = "due_soon"
+        open_debt_items.append(
+            {
+                "type": debt.type,
+                "counterparty": debt.counterparty,
+                "amount": _round_number(debt.amount),
+                "due_at": due_at.isoformat(),
+                "status": debt_status,
+            }
+        )
 
     overdue_amount = sum((debt.amount for debt in overdue_debts), Decimal("0"))
     due_soon_amount = sum((debt.amount for debt in due_soon_debts), Decimal("0"))
+    open_lent_amount = sum((debt.amount for debt in open_lent_debts), Decimal("0"))
+    open_borrowed_amount = sum((debt.amount for debt in open_borrowed_debts), Decimal("0"))
 
     return {
         "month_income": _round_number(month_income),
         "month_expenses": _round_number(month_expenses),
         "net_cashflow": _round_number(month_income - month_expenses),
         "top_category": top_category,
+        "top_categories": top_categories,
         "budget_alerts": budget_alerts[:3],
+        "budget_details": budget_details[:6],
         "over_budget_count": over_budget_count,
         "near_budget_count": near_budget_count,
         "overdue_debt_count": len(overdue_debts),
         "due_soon_debt_count": len(due_soon_debts),
         "overdue_debt_amount": _round_number(overdue_amount),
         "due_soon_debt_amount": _round_number(due_soon_amount),
+        "open_lent_debt_count": len(open_lent_debts),
+        "open_borrowed_debt_count": len(open_borrowed_debts),
+        "open_lent_debt_amount": _round_number(open_lent_amount),
+        "open_borrowed_debt_amount": _round_number(open_borrowed_amount),
+        "wallet_balances": wallet_balances,
+        "recent_transactions": recent_transactions,
+        "open_debts": open_debt_items[:6],
+        "month_transaction_count": month_transactions.count(),
+    }
+
+
+def _build_app_context(today, now, habits, due_habits, missed_habits, tasks, pending_tasks, overdue_tasks, tracker_trends):
+    return {
+        "today": today.isoformat(),
+        "due_habits": [
+            {
+                "name": habit.name,
+                "frequency": habit.frequency,
+                "streak_count": habit.streak_count,
+            }
+            for habit in due_habits[:5]
+        ],
+        "missed_habits": [
+            {
+                "name": habit.name,
+                "missed_periods": missed_count,
+                "frequency": habit.frequency,
+            }
+            for habit, missed_count in missed_habits[:5]
+        ],
+        "pending_tasks": [
+            {
+                "name": task.name,
+                "priority": task.priority,
+                "category": task.category,
+                "due_at": timezone.localtime(task.due_date).isoformat() if task.due_date else None,
+            }
+            for task in pending_tasks[:6]
+        ],
+        "overdue_tasks": [
+            {
+                "name": task.name,
+                "priority": task.priority,
+                "category": task.category,
+                "due_at": timezone.localtime(task.due_date).isoformat() if task.due_date else None,
+            }
+            for task in overdue_tasks[:5]
+        ],
+        "recent_trackers": [
+            {
+                "name": trend["name"],
+                "trend": trend["trend"],
+                "latest_value": trend["latest_value"],
+                "projected_next_value": trend["projected_next_value"],
+                "target_value": trend["target_value"],
+                "goal_direction": trend["goal_direction"],
+            }
+            for trend in tracker_trends[:5]
+        ],
+        "counts": {
+            "habit_count": len(habits),
+            "task_count": len(tasks),
+            "pending_tasks": len(pending_tasks),
+            "overdue_tasks": len(overdue_tasks),
+        },
+        "generated_at": timezone.localtime(now).isoformat(),
     }
 
 
@@ -914,7 +1099,7 @@ def generate_recommendations(user, language="en"):
     tasks = list(Task.objects.filter(user=user).order_by("completed", "due_date"))
     trackers = list(Tracker.objects.filter(user=user).order_by("-date")[:100])
     tracker_trends = build_tracker_trends(trackers)
-    finance_snapshot = build_finance_snapshot(user, reference_date=today)
+    finance_snapshot = build_finance_snapshot(user, reference_date=today, language=language)
 
     recommendations = []
 
@@ -1192,6 +1377,17 @@ def generate_recommendations(user, language="en"):
         "overdue_debts": finance_snapshot.get("overdue_debt_count", 0),
         "due_soon_debts": finance_snapshot.get("due_soon_debt_count", 0),
     }
+    app_context = _build_app_context(
+        today,
+        now,
+        habits,
+        due_habits,
+        missed_habits,
+        tasks,
+        pending_tasks,
+        overdue_tasks,
+        tracker_trends,
+    )
 
     return {
         "generated_at": timezone.now(),
@@ -1199,6 +1395,7 @@ def generate_recommendations(user, language="en"):
         "recommendations": recommendations[:10],
         "tracker_trends": tracker_trends,
         "finance_snapshot": finance_snapshot,
+        "app_context": app_context,
     }
 
 
@@ -1380,11 +1577,318 @@ def _format_budget_alert_items(alerts):
     return ", ".join(items)
 
 
+def _build_finance_health_note(finance_snapshot, language="en"):
+    language = _normalize_language(language)
+    snapshot = finance_snapshot or {}
+    wallet_total = sum(
+        Decimal(str(item.get("balance") or 0))
+        for item in (snapshot.get("wallet_balances") or [])
+    )
+    top_category = snapshot.get("top_category") or {}
+    note = _localized_text(
+        language,
+        en=(
+            "Current app picture: monthly income {income}, expenses {expenses}, net cash flow {net}, "
+            "wallet balances total about {wallet_total}."
+        ),
+        ru=(
+            "Текущая картина в приложении: доход за месяц {income}, расходы {expenses}, чистый поток {net}, "
+            "суммарный баланс кошельков около {wallet_total}."
+        ),
+        kz=(
+            "Қосымшадағы қазіргі көрініс: айлық табыс {income}, шығын {expenses}, таза ақша ағымы {net}, "
+            "әмияндардағы жалпы сома шамамен {wallet_total}."
+        ),
+    ).format(
+        income=snapshot.get("month_income", 0),
+        expenses=snapshot.get("month_expenses", 0),
+        net=snapshot.get("net_cashflow", 0),
+        wallet_total=_round_number(wallet_total),
+    )
+
+    extras = []
+    if top_category.get("name"):
+        extras.append(
+            _localized_text(
+                language,
+                en="Top spending category right now is {name} at {amount} ({share}%).",
+                ru="Самая крупная категория расходов сейчас — {name}: {amount} ({share}%).",
+                kz="Қазір ең үлкен шығын категориясы — {name}: {amount} ({share}%).",
+            ).format(
+                name=top_category.get("name"),
+                amount=top_category.get("amount"),
+                share=top_category.get("share_percent"),
+            )
+        )
+    if snapshot.get("overdue_debt_count"):
+        extras.append(
+            _localized_text(
+                language,
+                en="{count} debts are overdue, so any new long-term commitment needs caution.",
+                ru="{count} долгов уже просрочены, поэтому к новым долгим обязательствам стоит подходить осторожно.",
+                kz="{count} қарыздың мерзімі өтіп кеткен, сондықтан жаңа ұзақ міндеттемеге абайлап қараған дұрыс.",
+            ).format(count=snapshot.get("overdue_debt_count", 0))
+        )
+    elif snapshot.get("over_budget_count"):
+        extras.append(
+            _localized_text(
+                language,
+                en="{count} active budgets are already over limit, so first free up room in spending.",
+                ru="{count} активных бюджетов уже вышли за лимит, поэтому сначала нужно освободить место в расходах.",
+                kz="{count} белсенді бюджет лимиттен асып тұр, сондықтан алдымен шығынға орын босату керек.",
+            ).format(count=snapshot.get("over_budget_count", 0))
+        )
+    return " ".join([note, *extras]).strip()
+
+
+def _build_wallet_history_reply(ai_payload, language="en"):
+    language = _normalize_language(language)
+    finance_snapshot = ai_payload.get("finance_snapshot") or {}
+    wallet_balances = finance_snapshot.get("wallet_balances") or []
+    recent_transactions = finance_snapshot.get("recent_transactions") or []
+    if not wallet_balances and not recent_transactions:
+        return None
+
+    wallet_text = ", ".join(
+        f"{item.get('name')}: {item.get('balance')}"
+        for item in wallet_balances[:5]
+    ) or _localized_text(
+        language,
+        en="no wallet data yet",
+        ru="данных по кошелькам пока нет",
+        kz="әмиян деректері әзірге жоқ",
+    )
+    transaction_text = " | ".join(
+        f"{item.get('date')} {item.get('type')} {item.get('amount')} "
+        f"{item.get('category') or item.get('comment') or ''}".strip()
+        for item in recent_transactions[:5]
+    ) or _localized_text(
+        language,
+        en="no recent transaction history yet",
+        ru="пока нет свежей истории транзакций",
+        kz="соңғы транзакция тарихы әзірге жоқ",
+    )
+    top_category = finance_snapshot.get("top_category") or {}
+    top_line = ""
+    if top_category.get("name"):
+        top_line = _localized_text(
+            language,
+            en="Main spending pressure: {name} at {amount} ({share}%).",
+            ru="Главное давление по расходам: {name} на {amount} ({share}%).",
+            kz="Негізгі шығын қысымы: {name} — {amount} ({share}%).",
+        ).format(
+            name=top_category.get("name"),
+            amount=top_category.get("amount"),
+            share=top_category.get("share_percent"),
+        )
+
+    return _localized_text(
+        language,
+        en=(
+            "Here is the clearest picture from your app right now.\n"
+            "1. Wallet balances: {wallets}\n"
+            "2. Recent transaction history: {transactions}\n"
+            "3. {top_line}\n"
+            "If you want, I can turn this into a monthly income/expense review or a spending cut plan."
+        ),
+        ru=(
+            "Вот самая понятная картина по данным приложения сейчас.\n"
+            "1. Балансы кошельков: {wallets}\n"
+            "2. Последняя история транзакций: {transactions}\n"
+            "3. {top_line}\n"
+            "Если хотите, я превращу это в разбор доходов и расходов за месяц или план сокращения трат."
+        ),
+        kz=(
+            "Қосымшаңыздағы ең анық көрініс қазір мынадай.\n"
+            "1. Әмиян баланстары: {wallets}\n"
+            "2. Соңғы транзакция тарихы: {transactions}\n"
+            "3. {top_line}\n"
+            "Қаласаңыз, осыны айлық табыс-шығын талдауына немесе шығынды қысқарту жоспарына айналдырып беремін."
+        ),
+    ).format(
+        wallets=wallet_text,
+        transactions=transaction_text,
+        top_line=top_line or _localized_text(
+            language,
+            en="Top spending category is not clear yet.",
+            ru="Самая затратная категория пока не выделяется.",
+            kz="Ең көп шығын категориясы әзірге анық емес.",
+        ),
+    )
+
+
+def _build_house_purchase_reply(ai_payload, language="en"):
+    language = _normalize_language(language)
+    finance_snapshot = ai_payload.get("finance_snapshot") or {}
+    health_note = _build_finance_health_note(finance_snapshot, language=language)
+    net_cashflow = finance_snapshot.get("net_cashflow") or 0
+    caution_line = _localized_text(
+        language,
+        en="If your cash flow stays positive and debts are controlled, you can plan the purchase more aggressively.",
+        ru="Если денежный поток остается положительным и долги под контролем, к покупке можно двигаться активнее.",
+        kz="Егер ақша ағымы оң болып, қарыз бақылауда тұрса, сатып алуға батылырақ жоспар құруға болады.",
+    )
+    if net_cashflow <= 0 or finance_snapshot.get("overdue_debt_count") or finance_snapshot.get("over_budget_count"):
+        caution_line = _localized_text(
+            language,
+            en="Right now I would first stabilize cash flow, overdue debts, or over-limit budgets before taking on a mortgage-sized commitment.",
+            ru="Сейчас я бы сначала стабилизировал денежный поток, просроченные долги и бюджеты с превышением лимита, а потом уже брал обязательство уровня ипотеки.",
+            kz="Қазір мен алдымен ақша ағымын, мерзімі өткен қарыздарды және лимиттен асқан бюджеттерді реттеп алып, содан кейін ғана ипотека сияқты үлкен міндеттеме алар едім.",
+        )
+
+    return _localized_text(
+        language,
+        en=(
+            "Buying a home should start as a financial plan, not only as a wish.\n"
+            "{health_note}\n"
+            "1. Define the target: price range, city/area, and whether you need a mortgage or can buy with cash.\n"
+            "2. Calculate the down payment, closing costs, repair budget, and keep an emergency reserve for at least 3-6 months.\n"
+            "3. Check whether the future monthly payment fits safely into your cash flow after current expenses and debts.\n"
+            "4. Clean up expensive debt, late payments, and unstable spending before applying for a mortgage.\n"
+            "5. Compare mortgage rates, documents, insurance, developer risks, and total cost, not just the monthly payment.\n"
+            "{caution_line}\n"
+            "Next step: tell me your target price and time frame, and I can estimate a realistic savings or mortgage plan from your current numbers."
+        ),
+        ru=(
+            "Покупку жилья лучше начинать как финансовый план, а не только как желание.\n"
+            "{health_note}\n"
+            "1. Определите цель: диапазон цены, район/город и нужен ли вам ипотечный кредит или покупка будет за наличные.\n"
+            "2. Посчитайте первоначальный взнос, расходы на оформление, возможный ремонт и резерв хотя бы на 3-6 месяцев.\n"
+            "3. Проверьте, вписывается ли будущий ежемесячный платеж в ваш денежный поток после текущих расходов и долгов.\n"
+            "4. До ипотеки приведите в порядок дорогие долги, просрочки и нестабильные траты.\n"
+            "5. Сравнивайте не только ежемесячный платеж, но и ставку, документы, страховку, риски застройщика и итоговую стоимость.\n"
+            "{caution_line}\n"
+            "Следующий шаг: скажите желаемую цену жилья и срок, и я помогу прикинуть реалистичный план накопления или ипотеки по вашим текущим цифрам."
+        ),
+        kz=(
+            "Үй сатып алуды жай тілек ретінде емес, нақты қаржылық жоспар ретінде бастаған дұрыс.\n"
+            "{health_note}\n"
+            "1. Мақсатты нақтылаңыз: баға диапазоны, қала/аудан және ипотека керек пе, әлде қолма-қол алу жоспары ма.\n"
+            "2. Бастапқы жарнаны, рәсімдеу шығындарын, жөндеу қорын және кемінде 3-6 айлық қауіпсіздік қорын есептеңіз.\n"
+            "3. Қазіргі шығындар мен қарыздардан кейін болашақ айлық төлем сіздің ақша ағымыңызға қауіпсіз сия ма, соны тексеріңіз.\n"
+            "4. Ипотекаға дейін қымбат қарыздарды, кешіктірілген төлемдерді және тұрақсыз шығындарды реттеңіз.\n"
+            "5. Тек айлық төлемге емес, пайызға, құжаттарға, сақтандыруға, құрылысшы тәуекеліне және жалпы толық құнға қараңыз.\n"
+            "{caution_line}\n"
+            "Келесі қадам: үйдің шамамен бағасын және қанша уақытта алғыңыз келетінін жазыңыз, мен қазіргі сандарыңызға сүйеніп жинақ не ипотека жоспарын есептеп беремін."
+        ),
+    ).format(
+        health_note=health_note,
+        caution_line=caution_line,
+    )
+
+
+def _build_major_purchase_reply(question, ai_payload, language="en"):
+    language = _normalize_language(language)
+    finance_snapshot = ai_payload.get("finance_snapshot") or {}
+    health_note = _build_finance_health_note(finance_snapshot, language=language)
+    topic = _extract_general_topic(question) or _localized_text(
+        language,
+        en="this purchase",
+        ru="эту покупку",
+        kz="осы сатып алуды",
+    )
+    return _localized_text(
+        language,
+        en=(
+            "For {topic}, make the decision through numbers first.\n"
+            "{health_note}\n"
+            "1. Write the full cost: purchase price, delivery, setup, maintenance, and a safety buffer.\n"
+            "2. Decide whether you will pay from savings, monthly cash flow, or debt, and compare the real long-term cost.\n"
+            "3. Check what has to be reduced, delayed, or renegotiated in your current spending so this purchase does not create pressure later.\n"
+            "4. Set a deadline and a monthly amount for the goal, then review progress against your spending history.\n"
+            "Next step: tell me the exact item and price, and I will turn it into a realistic saving or purchase plan."
+        ),
+        ru=(
+            "По {topic} лучше принимать решение сначала через цифры.\n"
+            "{health_note}\n"
+            "1. Запишите полную стоимость: цена покупки, доставка, запуск, обслуживание и запас безопасности.\n"
+            "2. Решите, будете платить из накоплений, из ежемесячного потока или через долг, и сравните реальную долгосрочную стоимость.\n"
+            "3. Проверьте, что нужно сократить, отложить или пересмотреть в текущих расходах, чтобы эта покупка не создала давление позже.\n"
+            "4. Поставьте срок и ежемесячную сумму на цель, затем отслеживайте прогресс через историю расходов.\n"
+            "Следующий шаг: напишите точный предмет и цену, и я превращу это в реалистичный план накопления или покупки."
+        ),
+        kz=(
+            "{topic} бойынша шешімді алдымен эмоциямен емес, сандармен қабылдаған дұрыс.\n"
+            "{health_note}\n"
+            "1. Толық құнын жазыңыз: сатып алу бағасы, жеткізу, іске қосу, күтім және қауіпсіздік қоры.\n"
+            "2. Ақшаны жинақтан төлейсіз бе, айлық ақша ағымынан ба, әлде қарыз арқылы ма — соның ұзақ мерзімді нақты құнын салыстырыңыз.\n"
+            "3. Бұл сатып алу кейін қысым тудырмауы үшін қазіргі шығыннан нені қысқарту, кейінге қалдыру немесе қайта қарау керек екенін анықтаңыз.\n"
+            "4. Мерзім мен ай сайынғы мақсат сомасын қойып, прогресті шығын тарихыңызбен салыстырып отырыңыз.\n"
+            "Келесі қадам: нақты затты және бағасын жазыңыз, мен оны шынайы жинақ не сатып алу жоспарына айналдырып беремін."
+        ),
+    ).format(topic=topic, health_note=health_note)
+
+
+def _build_contextual_general_reply(question, ai_payload, language="en"):
+    language = _normalize_language(language)
+    topic = _extract_general_topic(question) or _localized_text(
+        language,
+        en="your situation",
+        ru="вашу ситуацию",
+        kz="жағдайыңызды",
+    )
+    summary = ai_payload.get("summary") or {}
+    finance_snapshot = ai_payload.get("finance_snapshot") or {}
+    app_note_parts = []
+    if summary.get("overdue_tasks"):
+        app_note_parts.append(
+            _localized_text(
+                language,
+                en="{count} overdue tasks are already competing for your attention.",
+                ru="У вас уже есть {count} просроченных задач, которые забирают внимание.",
+                kz="Қазірдің өзінде назарыңызды алып тұрған {count} мерзімі өткен тапсырма бар.",
+            ).format(count=summary.get("overdue_tasks", 0))
+        )
+    if finance_snapshot.get("net_cashflow") is not None and (
+        finance_snapshot.get("month_income") or finance_snapshot.get("month_expenses")
+    ):
+        app_note_parts.append(_build_finance_health_note(finance_snapshot, language=language))
+    app_note = " ".join(app_note_parts).strip()
+
+    return _localized_text(
+        language,
+        en=(
+            "Here is the clearest way to approach {topic}.\n"
+            "1. Define the exact outcome you want and the deadline.\n"
+            "2. Break it into the smallest next action you can finish today.\n"
+            "3. Remove the biggest blocker: lack of time, lack of money, unclear priority, or fear of starting.\n"
+            "{app_note}\n"
+            "If you want, send me one more detail and I will turn this into a more exact step-by-step plan."
+        ),
+        ru=(
+            "Вот самый понятный способ подойти к теме {topic}.\n"
+            "1. Сначала определите точный результат и срок.\n"
+            "2. Разбейте это на самый маленький следующий шаг, который реально завершить сегодня.\n"
+            "3. Уберите главный блокер: нехватку времени, денег, неясный приоритет или страх начать.\n"
+            "{app_note}\n"
+            "Если хотите, дайте мне еще одну деталь, и я превращу это в более точный пошаговый план."
+        ),
+        kz=(
+            "{topic} мәселесіне ең түсінікті жолмен былай жақындауға болады.\n"
+            "1. Алдымен нақты нәтиже мен мерзімді анықтаңыз.\n"
+            "2. Соны бүгін бітіруге болатын ең кішкентай келесі қадамға бөліңіз.\n"
+            "3. Ең үлкен бөгетті алып тастаңыз: уақыт жетпеуі, ақша жетпеуі, басымдықтың анық еместігі немесе бастау қорқынышы.\n"
+            "{app_note}\n"
+            "Қаласаңыз, бір қосымша деталь жазыңыз, мен мұны одан да нақты қадамдық жоспарға айналдырып беремін."
+        ),
+    ).format(
+        topic=topic,
+        app_note=app_note or _localized_text(
+            language,
+            en="",
+            ru="",
+            kz="",
+        ),
+    ).strip()
+
+
 def _build_finance_reply(question_lower, ai_payload, language="en"):
     language = _normalize_language(language)
     finance_snapshot = ai_payload.get("finance_snapshot") or {}
     top_category = finance_snapshot.get("top_category") or {}
     budget_alerts = finance_snapshot.get("budget_alerts") or []
+    wallet_balances = finance_snapshot.get("wallet_balances") or []
+    recent_transactions = finance_snapshot.get("recent_transactions") or []
 
     spending_keywords = (
         "money", "spend", "spending", "expense", "expenses", "category", "categories",
@@ -1398,7 +1902,15 @@ def _build_finance_reply(question_lower, ai_payload, language="en"):
         "денежный поток", "доход", "зарплат", "чист",
         "ақша ағымы", "табыс", "жалақы", "таза",
     )
+    history_keywords = (
+        "history", "transaction", "transactions", "wallet", "wallets",
+        "истор", "транзак", "кошел",
+        "тарих", "транзак", "әмиян",
+    )
     finance_keywords = spending_keywords + budget_keywords + debt_keywords + cashflow_keywords
+
+    if any(keyword in question_lower for keyword in history_keywords) and (wallet_balances or recent_transactions):
+        return _build_wallet_history_reply(ai_payload, language=language)
 
     if any(keyword in question_lower for keyword in spending_keywords) and top_category.get("name"):
         return _tr(
@@ -1432,6 +1944,15 @@ def _build_finance_reply(question_lower, ai_payload, language="en"):
                 "reply_finance_debt_due_soon",
                 count=finance_snapshot.get("due_soon_debt_count", 0),
             )
+        if finance_snapshot.get("open_lent_debt_count") or finance_snapshot.get("open_borrowed_debt_count"):
+            return _tr(
+                language,
+                "reply_finance_debt_position",
+                lent_count=finance_snapshot.get("open_lent_debt_count", 0),
+                lent_amount=finance_snapshot.get("open_lent_debt_amount", 0),
+                borrowed_count=finance_snapshot.get("open_borrowed_debt_count", 0),
+                borrowed_amount=finance_snapshot.get("open_borrowed_debt_amount", 0),
+            )
         return _tr(language, "reply_finance_debt_clear")
 
     if any(keyword in question_lower for keyword in cashflow_keywords):
@@ -1463,6 +1984,14 @@ def _build_finance_reply(question_lower, ai_payload, language="en"):
             )
         elif finance_snapshot.get("due_soon_debt_count"):
             parts.append(f"{finance_snapshot['due_soon_debt_count']} debts due soon")
+        elif finance_snapshot.get("open_lent_debt_count") or finance_snapshot.get("open_borrowed_debt_count"):
+            parts.append(
+                "open debts: "
+                f"lent {finance_snapshot.get('open_lent_debt_amount', 0)} "
+                f"across {finance_snapshot.get('open_lent_debt_count', 0)}, "
+                f"borrowed {finance_snapshot.get('open_borrowed_debt_amount', 0)} "
+                f"across {finance_snapshot.get('open_borrowed_debt_count', 0)}"
+            )
         if finance_snapshot.get("month_income") or finance_snapshot.get("month_expenses"):
             parts.append(
                 f"income {finance_snapshot.get('month_income', 0)}, expenses {finance_snapshot.get('month_expenses', 0)}, net {finance_snapshot.get('net_cashflow', 0)}"
@@ -1531,6 +2060,16 @@ def _build_local_ai_chat_reply(user, question, ai_payload=None, language="en"):
     now = timezone.now()
     today = timezone.localdate()
     question_lower = str(question or "").strip().lower()
+    house_keywords = (
+        "house", "home", "apartment", "flat", "mortgage", "property",
+        "дом", "квартир", "жиль", "ипотек",
+        "үй", "пәтер", "баспана", "ипотек",
+    )
+    purchase_keywords = (
+        "buy", "purchase", "afford", "save for", "save up",
+        "куп", "покуп", "накоп",
+        "сатып", "алу", "жина",
+    )
 
     habits = list(Habit.objects.filter(user=user).order_by("name"))
     tasks = list(Task.objects.filter(user=user).order_by("completed", "due_date", "-created_at"))
@@ -1576,6 +2115,15 @@ def _build_local_ai_chat_reply(user, question, ai_payload=None, language="en"):
             )
         reply.append(_tr(language, "reply_trend_next_step"))
         return " ".join(reply)
+
+    if any(keyword in question_lower for keyword in house_keywords):
+        return _build_house_purchase_reply(ai_payload, language=language)
+
+    if any(keyword in question_lower for keyword in purchase_keywords) and any(
+        marker in question_lower
+        for marker in ("buy", "purchase", "сатып", "куп", "afford", "накоп", "жина")
+    ):
+        return _build_major_purchase_reply(question, ai_payload, language=language)
 
     finance_reply = _build_finance_reply(question_lower, ai_payload, language=language)
     if finance_reply:
@@ -1625,6 +2173,9 @@ def _build_local_ai_chat_reply(user, question, ai_payload=None, language="en"):
     general_reply = _build_general_coaching_reply(question, language=language)
     if general_reply:
         return general_reply
+
+    if len(question_lower) >= 12:
+        return _build_contextual_general_reply(question, ai_payload, language=language)
 
     if recommendations:
         focus_items = recommendations[:2]

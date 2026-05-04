@@ -4,6 +4,7 @@ from django.urls import path, include
 from django.urls import re_path
 from django.conf import settings
 from django.conf.urls.static import static
+from django.views.static import serve
 from accounts.views import (
     root_entry_view,
     admin_login_view,
@@ -35,8 +36,13 @@ urlpatterns = [
 
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
-# Local project runs with DEBUG=False in .env, so we expose static assets
-# through Django as well to keep custom CSS visible during development.
+if not settings.DEBUG:
+    # Mobile clients hit the Django app directly on the local network, so
+    # expose media files even when DEBUG is disabled.
+    urlpatterns += [
+        re_path(r"^media/(?P<path>.*)$", serve, {"document_root": settings.MEDIA_ROOT}),
+    ]
+
 urlpatterns += [
     re_path(r'^static/(?P<path>.*)$', staticfiles_views.serve, {'insecure': True}),
 ]

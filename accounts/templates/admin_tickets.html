@@ -14,16 +14,19 @@
   <main class="wrap">
     <section class="top">
       <div>
-        <h1>Тикеты и Поддержка</h1>
-        <p>Работа с обращениями, чатами, SLA и приоритетами</p>
+        <h1>{% if support_only %}Техподдержка{% else %}Тикеты и Поддержка{% endif %}</h1>
+        <p>{% if support_only %}Работа только с обращениями пользователей и ответами в чате.{% else %}Работа с обращениями, чатами, SLA и приоритетами{% endif %}</p>
       </div>
       <div class="nav">
         <div id="clock" class="pill"></div>
+        {% if support_only %}
+        <a href="/dashboard/tickets/" class="nav-pill is-active">Тикеты</a>
+        {% else %}
         <a href="/dashboard/overview/" class="nav-pill">Обзор</a>
         <a href="/dashboard/tickets/" class="nav-pill is-active">Тикеты</a>
         <a href="/dashboard/activity/" class="nav-pill">Активность</a>
         <a href="/dashboard/users/" class="nav-pill">Пользователи</a>
-        <a href="/support/" class="nav-pill">Портал поддержки</a>
+        {% endif %}
         <form action="/dashboard/logout/" method="post">
           {% csrf_token %}
           <button type="submit" class="secondary-button">Выйти</button>
@@ -33,7 +36,9 @@
 
     <section class="card row">
       <button id="refreshBtn" class="primary">Обновить данные</button>
+      {% if not support_only %}
       <button id="exportBtn">Экспорт тикетов CSV</button>
+      {% endif %}
       <button id="pinnedToggle">Только закрепленные</button>
       <button id="urgentBtn">Фокус на срочный</button>
       <select id="statusFilter">
@@ -76,6 +81,7 @@
       </article>
     </section>
 
+    {% if not support_only %}
     <section class="split">
       <article class="card">
         <h2 class="title">Пользователи онлайн (последние 5 мин)</h2>
@@ -111,6 +117,7 @@
         </div>
       </article>
     </section>
+    {% endif %}
 
     <section class="split">
       <article class="card">
@@ -127,6 +134,7 @@
   </main>
 
   <script>
+    const supportOnly = {{ support_only|yesno:"true,false" }};
     const state = {
       tickets: [],
       activity: { online_count: 0, online_users: [], recent_logins: [] },
@@ -171,7 +179,7 @@
         ...(options.headers || {}),
       };
       const res = await fetch(path, { credentials: "same-origin", ...options, headers });
-      if (res.status === 403) throw new Error("403: нужен вход администратора");
+      if (res.status === 403) throw new Error("403: нет доступа к этому разделу");
       if (res.status === 401) throw new Error("401: нет авторизации");
       if (!res.ok) {
         const txt = await res.text();
@@ -305,14 +313,23 @@
         return (Date.now() - new Date(t.created_at).getTime()) > (6 * 60 * 60 * 1000);
       }).length;
 
-      const items = [
-        ["Тикеты", total],
-        ["Онлайн", online],
-        ["Открыт", byStatus.open || 0],
-        ["В работе", byStatus.in_progress || 0],
-        ["Отвечен", byStatus.answered || 0],
-        ["Риск по SLA", slaRisk],
-      ];
+      const items = supportOnly
+        ? [
+            ["Тикеты", total],
+            ["Открыт", byStatus.open || 0],
+            ["В работе", byStatus.in_progress || 0],
+            ["Отвечен", byStatus.answered || 0],
+            ["Закрыт", byStatus.closed || 0],
+            ["Риск по SLA", slaRisk],
+          ]
+        : [
+            ["Тикеты", total],
+            ["Онлайн", online],
+            ["Открыт", byStatus.open || 0],
+            ["В работе", byStatus.in_progress || 0],
+            ["Отвечен", byStatus.answered || 0],
+            ["Риск по SLA", slaRisk],
+          ];
 
       el.kpis.innerHTML = items.map(([l, v]) => `<div class="k"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
     }
@@ -525,6 +542,7 @@
     }
 
     function renderActivity() {
+      if (supportOnly || !el.onlineRows || !el.historyRows) return;
       const online = state.activity.online_users || [];
       const history = state.activity.recent_logins || [];
 
@@ -593,18 +611,28 @@
       renderKpis();
       renderTickets();
       renderTicketDetail();
-      renderActivity();
+      if (!supportOnly) renderActivity();
       renderTrendAndFaq();
     }
 
     async function loadData() {
       try {
         setStatus("Загрузка...");
-        const [tickets, activity] = await Promise.all([
-          api("/api/admin/support/tickets/"),
-          api("/api/admin/user-activity/")
-        ]);
-        const incoming = Array.isArray(tickets) ? tickets : [];
+        let incoming = [];
+        let activity = { online_count: 0, online_users: [], recent_logins: [] };
+
+        if (supportOnly) {
+          const tickets = await api("/api/admin/support/tickets/");
+          incoming = Array.isArray(tickets) ? tickets : [];
+        } else {
+          const [tickets, activityResponse] = await Promise.all([
+            api("/api/admin/support/tickets/"),
+            api("/api/admin/user-activity/")
+          ]);
+          incoming = Array.isArray(tickets) ? tickets : [];
+          activity = activityResponse || activity;
+        }
+
         const nextIds = new Set(incoming.map(t => Number(t.id)));
         let freshCount = 0;
         if (state.knownTicketIds.size > 0) {
@@ -626,7 +654,11 @@
           el.newAlert.style.display = "none";
           el.newAlert.textContent = "";
         }
-        setStatus(`Обновлено: ${state.tickets.length} тикетов, ${state.activity.online_count || 0} пользователей онлайн`);
+        if (supportOnly) {
+          setStatus(`Обновлено: ${state.tickets.length} тикетов`);
+        } else {
+          setStatus(`Обновлено: ${state.tickets.length} тикетов, ${state.activity.online_count || 0} пользователей онлайн`);
+        }
       } catch (err) {
         setStatus(`Ошибка загрузки: ${err.message}`, false);
       }
@@ -654,7 +686,8 @@
 
     function bindEvents() {
       document.getElementById("refreshBtn").addEventListener("click", loadData);
-      document.getElementById("exportBtn").addEventListener("click", exportCsv);
+      const exportBtn = document.getElementById("exportBtn");
+      if (exportBtn) exportBtn.addEventListener("click", exportCsv);
       el.pinnedToggle.addEventListener("click", togglePinnedOnly);
       el.urgentBtn.addEventListener("click", focusUrgentTicket);
       el.searchInput.addEventListener("input", renderTickets);
