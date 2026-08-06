@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: financial-app-backend
+    env: python
+    region: singapore
+    buildCommand: ./build.sh
+    startCommand: gunicorn financial_app.wsgi:application
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "*"
