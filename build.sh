@@ -4,5 +4,4 @@ set -o errexit
 
 pip install -r requirements.txt
 python manage.py collectstatic --no-input
-python manage.py migrate
-chmod 666 /tmp/finance_db.sqlite3 2>/dev/null || true
+python manage.py migrate --no-input

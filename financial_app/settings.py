@@ -144,10 +144,11 @@ elif DB_HOST and DB_HOST not in ('localhost', '127.0.0.1', '::1'):
         }
     }
 else:
+    import tempfile
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'NAME': Path(tempfile.gettempdir()) / 'finance_app.db' if os.name != 'nt' else BASE_DIR / 'db.sqlite3',
         }
     }
 
