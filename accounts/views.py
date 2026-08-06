@@ -15,6 +15,8 @@ from django.conf import settings
 from django.http import HttpResponse
 from django.shortcuts import render, redirect
 from django.views.decorators.http import require_http_methods
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, IsAuthenticated
@@ -281,7 +283,11 @@ class HomeView(APIView):
 # =========================
 # Register
 # =========================
+@method_decorator(csrf_exempt, name='dispatch')
 class RegisterView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()
         password = request.data.get("password")
@@ -311,7 +317,10 @@ class RegisterView(APIView):
 # =========================
 # Login
 # =========================
+@method_decorator(csrf_exempt, name='dispatch')
 class LoginView(APIView):
+    authentication_classes = []
+    permission_classes = []
     def post(self, request):
         try:
             email = (request.data.get("email") or "").strip().lower()
