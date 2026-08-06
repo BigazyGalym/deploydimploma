@@ -88,7 +88,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    # 'accounts.middleware.UserActivityMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
+    'accounts.middleware.UserActivityMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -143,10 +144,23 @@ elif DB_HOST and DB_HOST not in ('localhost', '127.0.0.1', '::1'):
         }
     }
 else:
+    import shutil
+    db_file = Path('/tmp') / 'finance_db.sqlite3' if os.name != 'nt' else BASE_DIR / 'db.sqlite3'
+    if os.name != 'nt':
+        try:
+            orig = BASE_DIR / 'db.sqlite3'
+            if not db_file.exists() and orig.exists():
+                shutil.copyfile(orig, db_file)
+            elif not db_file.exists():
+                db_file.touch()
+            os.chmod(db_file, 0o666)
+        except Exception:
+            pass
+
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'NAME': db_file,
             'OPTIONS': {
                 'timeout': 30,
             }
