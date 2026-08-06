@@ -121,7 +121,7 @@ WSGI_APPLICATION = 'financial_app.wsgi.application'
 # Database
 # ----------------------
 DATABASE_URL = os.getenv('DATABASE_URL')
-IS_RENDER = os.getenv('RENDER') == 'true' or os.getenv('RENDER_SERVICE_ID') is not None
+DB_HOST = os.getenv('DB_HOST', '').strip()
 
 if DATABASE_URL:
     DATABASES = {
@@ -132,22 +132,22 @@ if DATABASE_URL:
             ssl_require=True,
         )
     }
-elif IS_RENDER:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
-else:
+elif DB_HOST and DB_HOST not in ('localhost', '127.0.0.1', '::1'):
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': os.getenv('DB_NAME', 'finance_app'),
             'USER': os.getenv('DB_USER', 'postgres'),
             'PASSWORD': os.getenv('DB_PASSWORD', ''),
-            'HOST': os.getenv('DB_HOST', 'localhost'),
+            'HOST': DB_HOST,
             'PORT': os.getenv('DB_PORT', '5432'),
+        }
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
 

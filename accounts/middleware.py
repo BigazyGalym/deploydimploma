@@ -14,12 +14,12 @@ class UserActivityMiddleware:
         return self.get_response(request)
 
     def _touch_session_user(self, request):
-        user = getattr(request, "user", None)
-        if not user or not user.is_authenticated:
-            return
         try:
+            user = getattr(request, "user", None)
+            if not user or not user.is_authenticated:
+                return
             self._touch_or_open(user, source="web_admin" if user.is_staff else "web_user")
-        except (ProgrammingError, OperationalError):
+        except Exception:
             return
 
     def _touch_jwt_user(self, request):
