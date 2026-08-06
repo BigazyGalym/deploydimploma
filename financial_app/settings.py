@@ -119,7 +119,8 @@ WSGI_APPLICATION = 'financial_app.wsgi.application'
 # ----------------------
 # Database
 # ----------------------
-DATABASE_URL = os.getenv('DATABASE_URL')
+DEFAULT_DB_URL = 'postgresql://neondb_owner:npg_xP5u1eWkVGBA@ep-cool-fog-a18uubm6-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require'
+DATABASE_URL = os.getenv('DATABASE_URL', DEFAULT_DB_URL)
 DB_HOST = os.getenv('DB_HOST', '').strip()
 
 if DATABASE_URL:
