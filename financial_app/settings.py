@@ -44,7 +44,7 @@ load_env_file(BASE_DIR / '.env')
 
 # SECURITY
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-local-dev-key')
-DEBUG = get_env_bool('DEBUG', False)
+DEBUG = True
 ALLOWED_HOSTS = get_env_list(
     'ALLOWED_HOSTS',
     ['*'],
