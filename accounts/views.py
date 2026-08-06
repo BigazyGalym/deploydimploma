@@ -336,6 +336,7 @@ class RegisterView(APIView):
 class LoginView(APIView):
     authentication_classes = []
     permission_classes = []
+
     def post(self, request):
         try:
             email = (request.data.get("email") or "").strip().lower()
@@ -343,19 +344,16 @@ class LoginView(APIView):
             if not email or not password:
                 return Response({"detail": "Email and password are required."}, status=400)
 
-            user_by_email = User.objects.filter(email=email).first()
-            if user_by_email and not user_by_email.is_active:
+            user = User.objects.filter(email=email).first()
+            if not user or not user.check_password(password):
+                return Response({"detail": "Invalid credentials"}, status=401)
+
+            if not user.is_active:
                 return Response(
                     {"detail": "Email is not verified.", "verification_required": True},
                     status=403,
                 )
 
-            user = authenticate(
-                email=email,
-                password=password
-            )
-            if not user:
-                return Response({"detail": "Invalid credentials"}, status=401)
             refresh = RefreshToken.for_user(user)
             _open_login_activity(user, request, source="api")
             return Response({
