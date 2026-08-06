@@ -20,6 +20,7 @@ from .tracker_views import (
     AIChatView, AIRecommendationView,
 )
 from django.views.decorators.csrf import csrf_exempt
+from rest_framework_simplejwt.views import TokenRefreshView
 
 urlpatterns = [
     path('register/', csrf_exempt(RegisterView.as_view()), name='register'),
