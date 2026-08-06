@@ -376,6 +376,45 @@ class LoginView(APIView):
         })
 
 
+@method_decorator(csrf_exempt, name='dispatch')
+class DebugLoginView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        import sys, traceback
+        info = {}
+        try:
+            info['step'] = '1_parse_request'
+            email = (request.data.get("email") or "").strip().lower()
+            password = request.data.get("password")
+            info['email'] = email
+
+            info['step'] = '2_query_user'
+            user = User.objects.filter(email=email).first()
+            info['user_found'] = user is not None
+
+            info['step'] = '3_check_password'
+            if user:
+                info['pass_ok'] = user.check_password(password)
+
+            info['step'] = '4_jwt_refresh'
+            if user:
+                refresh = RefreshToken.for_user(user)
+                info['refresh_ok'] = True
+
+            return Response({"status": "debug_ok", "info": info})
+        except Exception as exc:
+            exc_type, exc_val, exc_tb = sys.exc_info()
+            return Response({
+                "status": "debug_error",
+                "step": info.get('step'),
+                "error_type": str(exc_type),
+                "error_message": str(exc_val),
+                "traceback": traceback.format_exc(),
+            }, status=200)
+
+
 class VerifyEmailCodeView(APIView):
     def post(self, request):
         email = (request.data.get("email") or "").strip().lower()

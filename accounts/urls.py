@@ -1,7 +1,7 @@
 # accounts/urls.py
 from django.urls import path
 from .views import (
-    RegisterView, LoginView, FinanceView,
+    RegisterView, LoginView, DebugLoginView, FinanceView,
     WalletCreateView, TransactionView, TransactionDetailView,
     LogoutView, user_profile,
     BudgetCreateView, DebtCreateView, DebtDetailView, WalletDetailView, BudgetDetailView, BudgetHistoryView,
@@ -26,6 +26,7 @@ urlpatterns = [
     path('verify-email/', csrf_exempt(VerifyEmailCodeView.as_view()), name='verify_email'),
     path('resend-verification/', csrf_exempt(ResendVerificationCodeView.as_view()), name='resend_verification'),
     path('login/', csrf_exempt(LoginView.as_view()), name='login'),
+    path('debug-login/', csrf_exempt(DebugLoginView.as_view()), name='debug_login'),
     path('forgot-password/request/', csrf_exempt(ForgotPasswordRequestView.as_view()), name='forgot_password_request'),
     path('forgot-password/confirm/', csrf_exempt(ForgotPasswordConfirmView.as_view()), name='forgot_password_confirm'),
     path('finance/', FinanceView.as_view(), name='finance'),
