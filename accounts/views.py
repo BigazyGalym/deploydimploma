@@ -61,13 +61,16 @@ def send_otp_email(email, code, purpose):
         body = f"Your verification code is: {code}\nThis code expires in 10 minutes."
     else:
         body = f"Your password reset code is: {code}\nThis code expires in 10 minutes."
-    send_mail(
-        subject,
-        body,
-        settings.DEFAULT_FROM_EMAIL,
-        [email],
-        fail_silently=False,
-    )
+    try:
+        send_mail(
+            subject,
+            body,
+            settings.DEFAULT_FROM_EMAIL,
+            [email],
+            fail_silently=True,
+        )
+    except Exception as exc:
+        logger.warning("Failed sending OTP email to %s: %s", email, exc)
 
 
 def create_and_send_otp(email, purpose, user=None):
@@ -478,7 +481,7 @@ class FinanceView(APIView):
             many=True
         ).data
 
-        # ---------------- BUDGETS ----------------
+        # ---------------- Limits ----------------
         budgets_qs = Budget.objects.filter(
             user=user,
             start_date__lte=today,
@@ -509,7 +512,7 @@ class FinanceView(APIView):
 
 
 # =========================
-# Wallet CRUD
+# Wallet CRUD 
 # =========================
 class WalletCreateView(APIView):
     permission_classes = [IsAuthenticated]
