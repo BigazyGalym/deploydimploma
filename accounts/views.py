@@ -338,32 +338,42 @@ class LoginView(APIView):
     permission_classes = []
 
     def post(self, request):
-        try:
-            email = (request.data.get("email") or "").strip().lower()
-            password = request.data.get("password")
-            if not email or not password:
-                return Response({"detail": "Email and password are required."}, status=400)
+        email = (request.data.get("email") or "").strip().lower()
+        password = request.data.get("password")
+        if not email or not password:
+            return Response({"detail": "Email and password are required."}, status=400)
 
+        try:
             user = User.objects.filter(email=email).first()
+        except Exception as exc:
+            return Response({"detail": f"Database user lookup failed: {exc}"}, status=500)
+
+        try:
             if not user or not user.check_password(password):
                 return Response({"detail": "Invalid credentials"}, status=401)
-
-            if not user.is_active:
-                return Response(
-                    {"detail": "Email is not verified.", "verification_required": True},
-                    status=403,
-                )
-
-            refresh = RefreshToken.for_user(user)
-            _open_login_activity(user, request, source="api")
-            return Response({
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
-            })
         except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            return Response({"detail": f"Internal server error: {exc}"}, status=500)
+            return Response({"detail": f"Password verification failed: {exc}"}, status=500)
+
+        if not user.is_active:
+            return Response(
+                {"detail": "Email is not verified.", "verification_required": True},
+                status=403,
+            )
+
+        try:
+            refresh = RefreshToken.for_user(user)
+        except Exception as exc:
+            return Response({"detail": f"JWT token creation failed: {exc}"}, status=500)
+
+        try:
+            _open_login_activity(user, request, source="api")
+        except Exception as exc:
+            logger.warning(f"Login activity logging failed: {exc}")
+
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+        })
 
 
 class VerifyEmailCodeView(APIView):
