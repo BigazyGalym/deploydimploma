@@ -19,15 +19,15 @@ from .tracker_views import (
     TrackerListCreateView, TrackerDetailView, TrackerDashboardView,
     AIChatView, AIRecommendationView,
 )
-from rest_framework_simplejwt.views import TokenRefreshView
+from django.views.decorators.csrf import csrf_exempt
 
 urlpatterns = [
-    path('register/', RegisterView.as_view(), name='register'),
-    path('verify-email/', VerifyEmailCodeView.as_view(), name='verify_email'),
-    path('resend-verification/', ResendVerificationCodeView.as_view(), name='resend_verification'),
-    path('login/', LoginView.as_view(), name='login'),
-    path('forgot-password/request/', ForgotPasswordRequestView.as_view(), name='forgot_password_request'),
-    path('forgot-password/confirm/', ForgotPasswordConfirmView.as_view(), name='forgot_password_confirm'),
+    path('register/', csrf_exempt(RegisterView.as_view()), name='register'),
+    path('verify-email/', csrf_exempt(VerifyEmailCodeView.as_view()), name='verify_email'),
+    path('resend-verification/', csrf_exempt(ResendVerificationCodeView.as_view()), name='resend_verification'),
+    path('login/', csrf_exempt(LoginView.as_view()), name='login'),
+    path('forgot-password/request/', csrf_exempt(ForgotPasswordRequestView.as_view()), name='forgot_password_request'),
+    path('forgot-password/confirm/', csrf_exempt(ForgotPasswordConfirmView.as_view()), name='forgot_password_confirm'),
     path('finance/', FinanceView.as_view(), name='finance'),
     path('wallet/', WalletCreateView.as_view(), name='wallet_create'),
     path('wallet/<int:pk>/', WalletDetailView.as_view(), name='wallet_detail'),
