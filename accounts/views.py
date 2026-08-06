@@ -313,30 +313,35 @@ class RegisterView(APIView):
 # =========================
 class LoginView(APIView):
     def post(self, request):
-        email = (request.data.get("email") or "").strip().lower()
-        password = request.data.get("password")
-        if not email or not password:
-            return Response({"detail": "Email and password are required."}, status=400)
+        try:
+            email = (request.data.get("email") or "").strip().lower()
+            password = request.data.get("password")
+            if not email or not password:
+                return Response({"detail": "Email and password are required."}, status=400)
 
-        user_by_email = User.objects.filter(email=email).first()
-        if user_by_email and not user_by_email.is_active:
-            return Response(
-                {"detail": "Email is not verified.", "verification_required": True},
-                status=403,
+            user_by_email = User.objects.filter(email=email).first()
+            if user_by_email and not user_by_email.is_active:
+                return Response(
+                    {"detail": "Email is not verified.", "verification_required": True},
+                    status=403,
+                )
+
+            user = authenticate(
+                email=email,
+                password=password
             )
-
-        user = authenticate(
-            email=email,
-            password=password
-        )
-        if not user:
-            return Response({"detail": "Invalid credentials"}, status=401)
-        refresh = RefreshToken.for_user(user)
-        _open_login_activity(user, request, source="api")
-        return Response({
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-        })
+            if not user:
+                return Response({"detail": "Invalid credentials"}, status=401)
+            refresh = RefreshToken.for_user(user)
+            _open_login_activity(user, request, source="api")
+            return Response({
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            })
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return Response({"detail": f"Internal server error: {exc}"}, status=500)
 
 
 class VerifyEmailCodeView(APIView):
