@@ -21,7 +21,22 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from rest_framework.views import APIView, exception_handler
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def custom_exception_handler(exc, context):
+    response = exception_handler(exc, context)
+    if response is None:
+        import traceback
+        logger.error("Unhandled API exception: %s\n%s", exc, traceback.format_exc())
+        return Response(
+            {"detail": f"Internal server error: {exc}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    return response
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import (

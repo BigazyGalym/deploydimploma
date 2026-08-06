@@ -178,6 +178,7 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ),
+    'EXCEPTION_HANDLER': 'accounts.views.custom_exception_handler',
 }
 
 SIMPLE_JWT = {
