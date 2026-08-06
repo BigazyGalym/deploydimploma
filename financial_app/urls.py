@@ -18,10 +18,19 @@ from accounts.views import (
     support_logout_view,
 )
 
+import sys
+import traceback
 from django.http import JsonResponse
 
 def health_check(request):
     return JsonResponse({"status": "ok", "message": "Backend is online"})
+
+def custom_500_handler(request, *args, **kwargs):
+    exc_type, exc_val, exc_tb = sys.exc_info()
+    tb_text = "".join(traceback.format_exception(exc_type, exc_val, exc_tb)) if exc_type else "No exception info"
+    return JsonResponse({"error": str(exc_val), "traceback": tb_text}, status=500)
+
+handler500 = custom_500_handler
 
 urlpatterns = [
     path('health/', health_check, name='health_check'),
