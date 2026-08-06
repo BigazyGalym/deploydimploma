@@ -30,7 +30,7 @@ def custom_500_handler(request, *args, **kwargs):
     tb_text = "".join(traceback.format_exception(exc_type, exc_val, exc_tb)) if exc_type else "No exception info"
     return JsonResponse({"error": str(exc_val), "traceback": tb_text}, status=500)
 
-handler500 = custom_500_handler
+handler500 = 'financial_app.urls.custom_500_handler'
 
 urlpatterns = [
     path('health/', health_check, name='health_check'),
