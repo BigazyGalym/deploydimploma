@@ -121,6 +121,8 @@ WSGI_APPLICATION = 'financial_app.wsgi.application'
 # Database
 # ----------------------
 DATABASE_URL = os.getenv('DATABASE_URL')
+IS_RENDER = os.getenv('RENDER') == 'true' or os.getenv('RENDER_SERVICE_ID') is not None
+
 if DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.config(
@@ -129,6 +131,13 @@ if DATABASE_URL:
             conn_health_checks=True,
             ssl_require=True,
         )
+    }
+elif IS_RENDER:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
 else:
     DATABASES = {
