@@ -295,6 +295,17 @@ class HomeView(APIView):
 
 
 
+def _ensure_db_migrated():
+    try:
+        from django.db import connection
+        from django.core.management import call_command
+        tables = connection.introspection.table_names()
+        if 'accounts_user' not in tables:
+            call_command('migrate', interactive=False)
+    except Exception as exc:
+        logger.warning(f"Auto-migrate failed: {exc}")
+
+
 # =========================
 # Register
 # =========================
@@ -304,6 +315,7 @@ class RegisterView(APIView):
     permission_classes = []
 
     def post(self, request):
+        _ensure_db_migrated()
         email = (request.data.get("email") or "").strip().lower()
         password = request.data.get("password")
         if not email or not password:
@@ -338,12 +350,16 @@ class LoginView(APIView):
     permission_classes = []
 
     def post(self, request):
+        _ensure_db_migrated()
         email = (request.data.get("email") or "").strip().lower()
         password = request.data.get("password")
         if not email or not password:
             return Response({"detail": "Email and password are required."}, status=400)
 
         try:
+            user = User.objects.filter(email=email).first()
+        except OperationalError:
+            _ensure_db_migrated()
             user = User.objects.filter(email=email).first()
         except Exception as exc:
             return Response({"detail": f"Database user lookup failed: {exc}"}, status=500)
