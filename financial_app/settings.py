@@ -119,8 +119,7 @@ WSGI_APPLICATION = 'financial_app.wsgi.application'
 # ----------------------
 # Database
 # ----------------------
-DEFAULT_DB_URL = 'postgresql://neondb_owner:npg_xP5u1eWkVGBA@ep-cool-fog-a18uubm6-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require'
-DATABASE_URL = os.getenv('DATABASE_URL', DEFAULT_DB_URL)
+DATABASE_URL = os.getenv('DATABASE_URL')
 DB_HOST = os.getenv('DB_HOST', '').strip()
 
 if DATABASE_URL:
@@ -144,11 +143,13 @@ elif DB_HOST and DB_HOST not in ('localhost', '127.0.0.1', '::1'):
         }
     }
 else:
-    import tempfile
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': Path(tempfile.gettempdir()) / 'finance_app.db' if os.name != 'nt' else BASE_DIR / 'db.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {
+                'timeout': 30,
+            }
         }
     }
 
